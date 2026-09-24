@@ -1,0 +1,43 @@
+@'
+# SECRETOS
+**/.env
+**/.env.*
+!**/.env.example
+
+# DEPENDENCIAS
+**/node_modules/
+**/vendor/
+
+# BUILDS / CACHE
+**/dist/
+**/.angular/
+escall-analytics-web/cache/
+
+# HERRAMIENTAS IA / LOCALES
+escall-analytics-api/.agents/
+escall-analytics-api/.claude/
+escall-analytics-api/.mcp.json
+escall-analytics-web/.branding-backup/
+
+# LARAVEL RUNTIME
+escall-analytics-api/storage/logs/*
+escall-analytics-api/storage/framework/cache/data/*
+escall-analytics-api/storage/framework/sessions/*
+escall-analytics-api/storage/framework/views/*
+escall-analytics-api/storage/app/private/*
+escall-analytics-api/bootstrap/cache/*.php
+
+# Mantener los .gitignore internos
+!**/.gitignore
+
+# EDITORES / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# TEMPORALES
+*.log
+*.tmp
+*.temp
+'@ | Set-Content .gitignore

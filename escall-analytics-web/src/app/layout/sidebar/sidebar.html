@@ -1,0 +1,113 @@
+<aside class="sidebar" [class.is-collapsed]="collapsed()" aria-label="Menú principal">
+  <a
+    class="sidebar-brand"
+    routerLink="/dashboard/expertis"
+    aria-label="ESCALL Analytics, inicio"
+    (click)="navigate.emit()"
+  >
+    @if (collapsed()) {
+      <img class="brand-mark" src="/assets/branding/logo-tipo.png" alt="ESCALL" />
+    } @else {
+      <img class="brand-wordmark" src="/assets/branding/logo.png" alt="ESCALL Perú" /><span
+        class="brand-product"
+        >ANALYTICS</span
+      >
+    }
+  </a>
+  <nav class="sidebar-nav">
+    <div class="nav-label">{{ collapsed() ? '•••' : 'ANÁLISIS Y GESTIÓN' }}</div>
+    <a
+      routerLink="/dashboard/expertis"
+      routerLinkActive="active"
+      (click)="navigate.emit()"
+      title="Dashboard Expertis"
+      ><app-icon name="LayoutDashboard" [size]="18" />
+      @if (!collapsed()) {
+        <span>Dashboard Expertis</span
+        ><app-icon class="nav-arrow" name="ChevronRight" [size]="14" />
+      }
+    </a>
+    @if (auth.canViewOperation()) {
+      <a
+        routerLink="/dashboard/operativo"
+        routerLinkActive="active"
+        (click)="navigate.emit()"
+        title="Operación diaria"
+        ><app-icon name="ChartNoAxesCombined" [size]="18" />
+        @if (!collapsed()) {
+          <span>Operación diaria</span>
+        }
+      </a>
+    }
+    @if (auth.canManageImports()) {
+      <a routerLink="/reportes" routerLinkActive="active" (click)="navigate.emit()" title="Reportes"
+        ><app-icon name="FileSpreadsheet" [size]="18" />
+        @if (!collapsed()) {
+          <span>Reportes</span>
+        }
+      </a>
+    }
+    @if (auth.canManageImports()) {
+      <a
+        routerLink="/importaciones/expertis/asignacion"
+        routerLinkActive="active"
+        (click)="navigate.emit()"
+        title="Importaciones"
+        ><app-icon name="ArrowDownToLine" [size]="18" />
+        @if (!collapsed()) {
+          <span>Importaciones</span>
+        }
+      </a>
+    }
+    @if (auth.canManageUsers()) {
+      <a
+        routerLink="/administracion/usuarios"
+        routerLinkActive="active"
+        (click)="navigate.emit()"
+        title="Usuarios"
+        ><app-icon name="Users" [size]="18" />
+        @if (!collapsed()) {
+          <span>Usuarios</span>
+        }
+      </a>
+    }
+  </nav>
+  @if (!collapsed()) {
+    <div class="sidebar-context">
+      <div class="flex items-center gap-2">
+        <span class="portfolio-dot"></span><strong>Cartera Expertis</strong>
+      </div>
+      <span>Septiembre 2026</span>
+      <div class="context-rule"></div>
+    </div>
+  }
+  <div class="sidebar-bottom">
+    <button
+      type="button"
+      class="collapse-button"
+      (click)="toggle.emit()"
+      [attr.aria-label]="collapsed() ? 'Expandir menú' : 'Colapsar menú'"
+      [title]="collapsed() ? 'Expandir menú' : 'Colapsar menú'"
+    >
+      <app-icon [name]="collapsed() ? 'PanelLeftOpen' : 'PanelLeftClose'" />
+      @if (!collapsed()) {
+        <span>Colapsar menú</span>
+      }
+    </button>
+    <div class="sidebar-account">
+      <span class="avatar" [title]="auth.displayName()">{{ auth.displayInitials() }}</span>
+      @if (!collapsed()) {
+        <div class="account-copy">
+          <strong>{{ auth.user()?.name }}</strong
+          ><span>{{ auth.user()?.role }}</span>
+        </div>
+      }
+    </div>
+    <button type="button" class="logout-button" (click)="logout()" title="Cerrar sesión">
+      <app-icon name="LogOut" [size]="16" />
+      @if (!collapsed()) {
+        <span>Cerrar sesión</span>
+      }
+    </button>
+  </div>
+</aside>

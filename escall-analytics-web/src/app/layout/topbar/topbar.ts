@@ -1,0 +1,7 @@
+import { ChangeDetectionStrategy, Component, inject, input, output } from '@angular/core';
+import { AuthService } from '../../core/services/auth.service';
+import { RefreshService } from '../../core/services/refresh.service';
+import { Icon } from '../../shared/components/icon/icon';
+@Component({ selector: 'app-topbar', imports: [Icon], changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `<header class="topbar"><div class="flex items-center gap-2.5"><button type="button" class="icon-button mobile-menu" aria-label="Abrir menú" (click)="menu.emit()"><app-icon name="Menu" /></button><span class="topbar-home">Analytics</span><app-icon class="topbar-home" name="ChevronRight" [size]="13" /><strong>{{ title() }}</strong></div><div class="topbar-right"><span class="update-time">Última actualización: <b>{{ refresh.updatedAt() }}</b></span><button type="button" class="btn btn-secondary refresh-button" (click)="refresh.refresh()" [disabled]="refresh.loading()"><app-icon name="RefreshCw" [size]="14" [class.spin]="refresh.loading()" /><span>Actualizar</span></button><div class="topbar-user" [title]="auth.user()?.email ?? ''"><span class="avatar avatar-small">{{ auth.displayInitials() }}</span><span>{{ auth.user()?.name }}</span></div></div></header>` })
+export class Topbar { readonly auth = inject(AuthService); readonly refresh = inject(RefreshService); readonly title = input.required<string>(); readonly menu = output<void>(); }

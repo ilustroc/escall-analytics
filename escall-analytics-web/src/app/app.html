@@ -1,0 +1,9 @@
+<router-outlet />
+@if (feedback.message()) {
+  <div class="toast" role="status">
+    <app-icon name="Info" [size]="18" /><span>{{ feedback.message() }}</span
+    ><button type="button" aria-label="Cerrar mensaje" (click)="feedback.message.set('')">
+      <app-icon name="X" [size]="15" />
+    </button>
+  </div>
+}

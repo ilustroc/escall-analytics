@@ -1,0 +1,76 @@
+<div class="dashboard-page operativo-page">
+  <app-page-header
+    title="Operación diaria"
+    subtitle="Monitoreo de productividad y resultados por asesor"
+    ><span class="portfolio-pill"
+      ><app-icon name="CalendarDays" [size]="14" />{{ date(data.filters().desde) }}</span
+    ></app-page-header
+  ><app-operativo-filters />
+  <div class="section-eyebrow">
+    <span>PULSO DE LA OPERACIÓN</span
+    ><span>{{ data.ranking().length }} asesores con actividad</span>
+    @if (data.dashboardLoading() && data.dashboardLoaded()) {
+      <span class="refresh-state"
+        ><app-icon name="RefreshCw" [size]="11" class="spin" />Actualizando…</span
+      >
+    }
+  </div>
+  @if (data.dashboardLoading() && !data.dashboardLoaded()) {
+    <app-loading-skeleton />
+  } @else {
+    <div class="operativo-kpi-grid">
+      <app-kpi-card
+        title="Gestiones hoy"
+        [value]="number(data.metrics().gestiones)"
+        [subtitle]="date(data.filters().desde)"
+        icon="Headphones"
+        variant="accent"
+      /><app-kpi-card
+        title="Clientes gestionados"
+        [value]="number(data.metrics().clientes)"
+        subtitle="DNI únicos"
+        icon="Users"
+      /><app-kpi-card
+        title="Clientes contactados"
+        [value]="number(data.metrics().contactados)"
+        subtitle="CE + contacto no efectivo"
+        icon="Phone"
+      /><app-kpi-card
+        title="Contacto efectivo"
+        [value]="percent(data.metrics().contactoEfectivo)"
+        subtitle="Sobre clientes gestionados"
+        icon="Target"
+      /><app-kpi-card
+        title="PPC"
+        [value]="number(data.metrics().ppc)"
+        subtitle="Clientes consolidados"
+        icon="FileCheck2"
+      /><app-kpi-card
+        title="Monto comprometido"
+        [value]="money(data.metrics().montoComprometido)"
+        subtitle="Promesas del día"
+        icon="Wallet"
+      /><app-kpi-card
+        title="Clientes con pago"
+        [value]="number(data.metrics().clientesPago)"
+        subtitle="Pagos del día"
+        icon="CheckCheck"
+      /><app-kpi-card
+        title="Monto pagado"
+        [value]="money(data.metrics().montoPagado)"
+        subtitle="Recaudación del día"
+        icon="HandCoins"
+      />
+    </div>
+    @if (data.hasResults()) {
+      <div class="operation-content">
+        <div class="operation-main">
+          <app-advisor-ranking [rows]="data.ranking()" /><app-operativo-charts />
+        </div>
+        <app-recent-activity [rows]="data.recent()" />
+      </div>
+    } @else {
+      <app-empty-state (reset)="data.reset()" />
+    }
+  }
+</div>

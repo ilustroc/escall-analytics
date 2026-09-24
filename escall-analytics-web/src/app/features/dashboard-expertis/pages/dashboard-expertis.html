@@ -1,0 +1,102 @@
+<div class="dashboard-page">
+  <app-page-header
+    title="Dashboard Expertis"
+    subtitle="Seguimiento de gestión y resultados de cartera"
+  >
+  </app-page-header>
+  <app-expertis-filters />
+  <div class="section-eyebrow">
+    <span>RESUMEN DE GESTIÓN</span>
+    @if (data.dashboardLoading() && data.dashboardLoaded()) {
+      <span class="refresh-state"
+        ><app-icon name="RefreshCw" [size]="11" class="spin" />Actualizando…</span
+      >
+    }
+  </div>
+  @if (data.dashboardLoading() && !data.dashboardLoaded()) {
+    <app-loading-skeleton />
+  } @else {
+    <div class="kpi-primary-grid">
+      <app-kpi-card
+        title="Gestiones realizadas"
+        [value]="number(data.metrics().gestiones)"
+        subtitle="Interacciones registradas"
+        icon="Headphones"
+        variant="accent"
+      /><app-kpi-card
+        title="Clientes gestionados"
+        [value]="number(data.metrics().clientes)"
+        subtitle="DNI únicos en el periodo"
+        icon="Users"
+      /><app-kpi-card
+        title="Contactabilidad"
+        [value]="percent(data.metrics().contactabilidad)"
+        subtitle="Clientes contactados / gestionados"
+        icon="Phone"
+      /><app-kpi-card
+        title="Contacto efectivo"
+        [value]="percent(data.metrics().contactoEfectivo)"
+        subtitle="Mejor resultado por cliente"
+        icon="Target"
+      /><app-kpi-card
+        title="Intensidad promedio"
+        [value]="decimal(data.metrics().intensidad)"
+        subtitle="Gestiones por cliente"
+        icon="Activity"
+      />
+    </div>
+    <div class="kpi-secondary-grid">
+      <app-kpi-card
+        title="Clientes contactados"
+        [value]="number(data.metrics().contactados)"
+        subtitle="Contacto efectivo + no efectivo"
+        icon="UserRound"
+      /><app-kpi-card
+        title="Clientes con contacto efectivo"
+        [value]="number(data.metrics().efectivos)"
+        subtitle="Resultado consolidado CEF"
+        icon="CheckCheck"
+      /><app-kpi-card
+        title="Clientes con compromiso"
+        [value]="number(data.metrics().compromisos)"
+        subtitle="Con fecha de compromiso"
+        icon="FileCheck2"
+      /><app-kpi-card
+        title="Monto comprometido"
+        [value]="money(data.metrics().montoComprometido)"
+        subtitle="Compromisos válidos del periodo"
+        icon="Wallet"
+      />
+    </div>
+    <section class="payment-strip" aria-label="Resultados de pago">
+      <span class="payment-strip-heading"
+        ><app-icon name="HandCoins" [size]="18" />RESULTADOS DE PAGO</span
+      >
+      <div>
+        <span>Pagos registrados</span><strong>{{ number(data.paymentCount()) }}</strong>
+      </div>
+      <div>
+        <span>Clientes con pago</span><strong>{{ number(data.metrics().clientesPago) }}</strong>
+      </div>
+      <div>
+        <span>Monto pagado</span><strong>{{ money(data.metrics().montoPagado) }}</strong>
+      </div>
+      <div>
+        <span>Cumplimiento</span><strong>{{ percent(data.metrics().cumplimiento) }}</strong>
+      </div>
+    </section>
+    @if (data.hasResults()) {
+      <app-expertis-charts /><app-gestion-grid
+        [rows]="data.rows()"
+        [pagination]="data.pagination()"
+        [loading]="data.tableLoading()"
+        (pageChange)="data.setPage($event)"
+        (pageSizeChange)="data.setPageSize($event)"
+        (searchChange)="data.setSearch($event)"
+        (sortChange)="data.setSort($event)"
+      />
+    } @else {
+      <app-empty-state (reset)="data.reset()" />
+    }
+  }
+</div>
