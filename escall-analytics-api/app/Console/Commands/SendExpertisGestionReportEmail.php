@@ -5,14 +5,14 @@ namespace App\Console\Commands;
 use App\Jobs\SendExpertisGestionReportJob;
 use App\Services\Analytics\GestionCsvExportService;
 use Carbon\CarbonImmutable;
-use Illuminate\Console\Attributes\Description;
-use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 
-#[Signature('analytics:expertis-report-email {--dry-run : Genera el reporte sin enviar correo} {--send : Encola el envío real} {--cut=CORTE_14 : CORTE_14 o CORTE_20} {--date= : Fecha de corte YYYY-MM-DD}')]
-#[Description('Genera o encola el Reporte de Gestiones Expertis')]
 final class SendExpertisGestionReportEmail extends Command
 {
+    protected $signature = 'analytics:expertis-report-email {--dry-run : Genera el reporte sin enviar correo} {--send : Encola el envío real} {--cut=CORTE_14 : CORTE_14 o CORTE_20} {--date= : Fecha de corte YYYY-MM-DD}';
+
+    protected $description = 'Genera o encola el Reporte de Gestiones Expertis';
+
     public function handle(GestionCsvExportService $csv): int
     {
         $cut = strtoupper((string) $this->option('cut'));

@@ -3,16 +3,16 @@
 namespace App\Console\Commands;
 
 use App\Models\AnalyticsUser;
-use Illuminate\Console\Attributes\Description;
-use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 
-#[Signature('analytics:admin:create')]
-#[Description('Crea un administrador de ESCALL Analytics')]
 final class CreateAnalyticsAdministrator extends Command
 {
+    protected $signature = 'analytics:admin:create';
+
+    protected $description = 'Crea un administrador de ESCALL Analytics';
+
     public function handle(): int
     {
         $name = (string) $this->ask('Nombre');
