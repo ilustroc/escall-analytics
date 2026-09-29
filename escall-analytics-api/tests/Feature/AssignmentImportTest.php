@@ -12,6 +12,7 @@ use App\Services\Analytics\AssignmentImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
@@ -27,6 +28,7 @@ final class AssignmentImportTest extends TestCase
     {
         parent::setUp();
         Storage::fake('local');
+        Queue::fake();
         $this->createAssignmentTable();
     }
 
@@ -146,7 +148,7 @@ final class AssignmentImportTest extends TestCase
         $this->assertNotEmpty($import->metadata['validation']['errors']);
     }
 
-    public function test_duplicate_accounts_fail_validation_without_touching_assignment(): void
+    public function test_invalid_rows_are_rejected_while_valid_assignment_rows_are_imported(): void
     {
         $import = $this->uploadAsSupervisor($this->csvContent([
             ['10000001', 'EXPERTIS', 'CLIENTE UNO', 'CTA-001'],
@@ -155,10 +157,14 @@ final class AssignmentImportTest extends TestCase
         $this->runValidation($import);
 
         $import->refresh();
-        $this->assertSame('failed', $import->status);
+        $this->assertSame('validated', $import->status);
         $this->assertSame(1, $import->rows_rejected);
         $this->assertSame(1, $import->metadata['validation']['duplicates']);
-        $this->assertDatabaseCount('Asignacion_Expertis_Historico', 0);
+        $this->runImport($import);
+        $import->refresh();
+        $this->assertSame('completed_with_errors', $import->status);
+        $this->assertSame(1, $import->rows_inserted);
+        $this->assertDatabaseCount('Asignacion_Expertis_Historico', 1);
     }
 
     public function test_validated_staging_swaps_a_period_atomically(): void
@@ -178,6 +184,43 @@ final class AssignmentImportTest extends TestCase
         $this->assertSame(2, $import->rows_inserted);
         $this->assertDatabaseCount('Asignacion_Expertis_Historico', 2);
         $this->assertDatabaseMissing('Asignacion_Expertis_Historico', ['conca' => 'OLD-1']);
+    }
+
+    public function test_assignment_with_no_valid_rows_keeps_the_current_period_and_exposes_error_csv(): void
+    {
+        DB::table('Asignacion_Expertis_Historico')->insert([
+            'FEC_PRO' => '202609', 'Documento_RUC' => 'OLD', 'CARTERA' => 'OLD', 'NombreDeudor' => 'ANTERIOR', 'conca' => 'OLD-1',
+        ]);
+        $import = $this->uploadAsSupervisor($this->csvContent([
+            ['', 'EXPERTIS', 'CLIENTE UNO', 'CTA-001'],
+            ['10000002', '', 'CLIENTE DOS', 'CTA-002'],
+        ]));
+
+        $this->runValidation($import);
+        $import->refresh();
+
+        $this->assertSame('completed_with_errors', $import->status);
+        $this->assertSame(0, $import->rows_inserted);
+        $this->assertSame(2, $import->rows_rejected);
+        $this->assertDatabaseHas('Asignacion_Expertis_Historico', ['FEC_PRO' => '202609', 'conca' => 'OLD-1']);
+        $response = $this->actingAs(AnalyticsUser::query()->findOrFail($import->created_by), 'analytics')
+            ->get("/api/v1/imports/{$import->id}/errores");
+        $response
+            ->assertOk()
+            ->assertHeader('content-type', 'text/csv; charset=UTF-8');
+        self::assertStringContainsString('FILA_ORIGEN', $response->streamedContent());
+        self::assertStringContainsString('Valor obligatorio ausente', $response->streamedContent());
+    }
+
+    public function test_validation_job_queues_the_automatic_assignment_process(): void
+    {
+        $import = $this->uploadAsSupervisor($this->csvContent([
+            ['10000001', 'EXPERTIS', 'CLIENTE UNO', 'CTA-001'],
+        ]));
+
+        $this->runValidation($import);
+
+        Queue::assertPushed(ProcessExpertisAssignmentImport::class, fn (ProcessExpertisAssignmentImport $job): bool => $job->importId === $import->id);
     }
 
     public function test_completed_hash_cannot_be_uploaded_again_for_the_same_period(): void

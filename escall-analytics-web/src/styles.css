@@ -2377,6 +2377,50 @@
   border-color: #c9e5d6;
   background: #fbfffc;
 }
+.import-result {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 13px 13px;
+  padding: 12px;
+  border: 1px solid #d8e7f7;
+  border-radius: 7px;
+  background: #fbfdff;
+  color: #35628e;
+}
+.import-result.completed {
+  border-color: #c9e5d6;
+  background: #fbfffc;
+  color: #287a58;
+}
+.import-result.failed {
+  border-color: #f0c9cd;
+  background: #fffafb;
+  color: #a5454d;
+}
+.import-result > div {
+  min-width: 0;
+  flex: 1;
+}
+.import-result h3 {
+  margin: 0;
+  font-size: 11px;
+  color: inherit;
+}
+.import-result p {
+  margin: 3px 0 0;
+  color: #71839a;
+  font-size: 10px;
+}
+@media (max-width: 640px) {
+  .import-result {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .import-result .btn {
+    width: 100%;
+  }
+}
 .progress-title {
   display: flex;
   align-items: start;

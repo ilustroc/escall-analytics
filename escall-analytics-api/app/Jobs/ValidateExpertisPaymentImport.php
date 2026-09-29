@@ -30,13 +30,16 @@ final class ValidateExpertisPaymentImport implements ShouldQueue
         }
         $imports->validate($import);
         $import->refresh();
-        $audit->logImport($import->status === 'validated' ? 'payments_import_validated' : 'payments_import_failed', $import, ['stage' => 'validation']);
+        if ($import->status === 'validated') {
+            ProcessExpertisPaymentImport::dispatch($import->id)->onQueue('imports');
+        }
+        $audit->logImport($import->status === 'failed' ? 'payments_import_failed' : 'payments_import_validated', $import, ['stage' => 'validation']);
     }
 
     public function failed(Throwable $exception): void
     {
         $import = AnalyticsImport::query()->find($this->importId);
-        if ($import !== null && ! in_array($import->status, ['completed', 'failed'], true)) {
+        if ($import !== null && ! in_array($import->status, ['completed', 'completed_with_errors', 'failed'], true)) {
             app(PaymentImportService::class)->fail($import, 'validation');
             app(AnalyticsAuditService::class)->logImport('payments_import_failed', $import, ['stage' => 'validation']);
         }

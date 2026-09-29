@@ -55,7 +55,7 @@ type ImportTab = 'asignacion' | 'pagos' | 'gestiones';
         <header class="detail-header">
           <div>
             <h2>Nueva importación</h2>
-            <p>La asignación se valida en segundo plano antes de reemplazar el periodo.</p>
+            <p>El archivo se procesará automáticamente al iniciar la importación.</p>
           </div>
           @if (config()) {
             <span class="import-limit"
@@ -85,7 +85,7 @@ type ImportTab = 'asignacion' | 'pagos' | 'gestiones';
           <div class="import-current">
             <span>Asignación actual</span>
             <strong>{{ number(config()?.existingRows ?? 0) }} registros</strong>
-            <small>Se reemplaza solo tras una validación completa.</small>
+            <small>Se reemplaza únicamente con las filas correctas del archivo.</small>
           </div>
         </div>
 
@@ -133,13 +133,13 @@ type ImportTab = 'asignacion' | 'pagos' | 'gestiones';
           <button
             class="btn btn-primary"
             type="button"
-            (click)="validate()"
+            (click)="importFile()"
             [disabled]="busy() || !file()"
           >
             @if (uploading()) {
               <app-icon name="LoaderCircle" [size]="15" />Subiendo...
             } @else {
-              <app-icon name="ShieldCheck" [size]="15" />Validar archivo
+              <app-icon name="ArrowDownToLine" [size]="15" />Importar asignación
             }
           </button>
           @if (current()) {
@@ -147,7 +147,7 @@ type ImportTab = 'asignacion' | 'pagos' | 'gestiones';
               ><span
                 class="status-dot"
                 [class.failed]="current()!.status === 'failed'"
-                [class.done]="current()!.status === 'completed'"
+                [class.done]="isCompleted(current()!.status)"
               ></span
               >{{ statusLabel(current()!.status) }}</span
             >
@@ -159,83 +159,33 @@ type ImportTab = 'asignacion' | 'pagos' | 'gestiones';
 
         @if (current()) {
           <section
-            class="import-progress-card"
+            class="import-result"
             [class.failed]="current()!.status === 'failed'"
-            [class.completed]="current()!.status === 'completed'"
+            [class.completed]="isCompleted(current()!.status)"
           >
-            <div class="progress-title">
-              <div>
-                <h3>{{ statusLabel(current()!.status) }}</h3>
-                <p>{{ stageDescription(current()!.status) }}</p>
-              </div>
-              <strong>{{ progressLabel(current()!) }}</strong>
+            <app-icon
+              [name]="
+                current()!.status === 'failed'
+                  ? 'TriangleAlert'
+                  : isCompleted(current()!.status)
+                    ? 'CheckCheck'
+                    : 'LoaderCircle'
+              "
+              [size]="19"
+              [class.spin]="isInProgress(current()!.status)"
+            />
+            <div>
+              <h3>{{ resultTitle(current()!.status) }}</h3>
+              <p>{{ resultDescription(current()!) }}</p>
             </div>
-            <div class="progress-track"><span [style.width.%]="current()!.progress"></span></div>
-            <ol class="import-stages">
-              <li [class.done]="stageDone('received')">Archivo recibido</li>
-              <li [class.done]="stageDone('structure')">Estructura validada</li>
-              <li [class.done]="stageDone('validated')">Datos validados</li>
-              <li [class.done]="stageDone('processing')">Cargando asignación</li>
-              <li [class.done]="stageDone('completed')">Completado</li>
-            </ol>
+            @if (current()!.hasErrorsFile) {
+              <button class="btn btn-secondary" type="button" (click)="downloadErrors(current()!)">
+                <app-icon name="ArrowDownToLine" [size]="15" />Descargar errores
+              </button>
+            }
           </section>
-
-          @if (
-            current()!.status === 'validated' ||
-            current()!.status === 'processing' ||
-            current()!.status === 'completed' ||
-            current()!.status === 'failed'
-          ) {
-            <div class="import-summary import-summary-expanded">
-              <div>
-                <span>Filas</span><strong>{{ number(current()!.rowsTotal) }}</strong>
-              </div>
-              <div>
-                <span>Clientes</span><strong>{{ number(current()!.clients) }}</strong>
-              </div>
-              <div>
-                <span>Cuentas</span><strong>{{ number(current()!.accounts) }}</strong>
-              </div>
-              <div>
-                <span>Duplicados</span
-                ><strong [class.error-value]="current()!.duplicates > 0">{{
-                  number(current()!.duplicates)
-                }}</strong>
-              </div>
-              <div>
-                <span>Errores</span
-                ><strong [class.error-value]="current()!.rowsRejected > 0">{{
-                  number(current()!.rowsRejected)
-                }}</strong>
-              </div>
-            </div>
-          }
-
           @if (current()!.error) {
             <p class="form-error">{{ current()!.error }}</p>
-          }
-          @if (current()!.errors.length) {
-            <details class="import-errors">
-              <summary>Ver {{ current()!.errors.length }} errores de validación</summary>
-              <ul>
-                @for (error of current()!.errors; track $index) {
-                  <li>Fila {{ error.row ?? '-' }} · {{ error.column }}: {{ error.message }}</li>
-                }
-              </ul>
-            </details>
-          }
-
-          @if (current()!.status === 'validated') {
-            <div class="replacement-notice">
-              <app-icon name="Info" [size]="15" /><span
-                >Esta importación reemplazará completamente la asignación del periodo
-                <strong>{{ periodLabel() }}</strong> una vez validada.</span
-              >
-            </div>
-            <button class="btn btn-primary" type="button" (click)="confirmReplacement()">
-              <app-icon name="ArrowDownToLine" [size]="15" />Importar
-              {{ number(current()!.rowsTotal) }} filas
-            </button>
           }
         }
       </section>
@@ -299,34 +249,6 @@ type ImportTab = 'asignacion' | 'pagos' | 'gestiones';
       </section>
     }
 
-    @if (confirming()) {
-      <div class="import-modal-backdrop" role="presentation">
-        <section
-          class="import-modal"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="replace-title"
-        >
-          <header>
-            <app-icon name="TriangleAlert" [size]="19" />
-            <h2 id="replace-title">Reemplazar asignación</h2>
-          </header>
-          <p>
-            La asignación actual de <strong>{{ periodLabel() }}</strong> tiene
-            <strong>{{ number(config()?.existingRows ?? 0) }} registros</strong>. Se sustituirá por
-            <strong>{{ number(current()?.rowsTotal ?? 0) }} filas</strong> solo cuando el proceso
-            confirme el reemplazo.
-          </p>
-          <footer>
-            <button class="btn btn-secondary" type="button" (click)="confirming.set(false)">
-              Cancelar</button
-            ><button class="btn btn-primary" type="button" (click)="startImport()">
-              Reemplazar asignación
-            </button>
-          </footer>
-        </section>
-      </div>
-    }
     @if (detail()) {
       <div class="import-modal-backdrop" role="presentation">
         <section
@@ -381,6 +303,11 @@ type ImportTab = 'asignacion' | 'pagos' | 'gestiones';
             <p class="form-error">{{ detail()!.error }}</p>
           }
           <footer>
+            @if (detail()!.hasErrorsFile) {
+              <button class="btn btn-secondary" type="button" (click)="downloadErrors(detail()!)">
+                <app-icon name="ArrowDownToLine" [size]="15" />Descargar errores
+              </button>
+            }
             <button class="btn btn-primary" type="button" (click)="detail.set(null)">Cerrar</button>
           </footer>
         </section>
@@ -400,7 +327,6 @@ export class ImportAssignment implements OnDestroy {
   readonly uploading = signal(false);
   readonly current = signal<ImportRecord | null>(null);
   readonly history = signal<ImportRecord[]>([]);
-  readonly confirming = signal(false);
   readonly detail = signal<ImportRecord | null>(null);
   periodMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
   period = this.periodMonth.replace('-', '');
@@ -452,11 +378,11 @@ export class ImportAssignment implements OnDestroy {
     this.pollSubscription?.unsubscribe();
   }
 
-  validate(): void {
+  importFile(): void {
     const selectedFile = this.file();
     if (!selectedFile) return;
     this.uploading.set(true);
-    this.api.validate(this.period, selectedFile).subscribe({
+    this.api.importAssignment(this.period, selectedFile).subscribe({
       next: (record) => {
         this.current.set(record);
         this.uploading.set(false);
@@ -466,28 +392,6 @@ export class ImportAssignment implements OnDestroy {
         this.uploading.set(false);
         this.feedback.show(error.error?.message ?? 'El archivo no pudo recibirse.');
       },
-    });
-  }
-
-  confirmReplacement(): void {
-    if (this.current()?.existingRows ?? this.config()?.existingRows) {
-      this.confirming.set(true);
-      return;
-    }
-    this.startImport();
-  }
-
-  startImport(): void {
-    const record = this.current();
-    if (!record || record.status !== 'validated') return;
-    this.confirming.set(false);
-    this.api.import(record.id).subscribe({
-      next: (updated) => {
-        this.current.set(updated);
-        this.poll(updated.id);
-      },
-      error: (error) =>
-        this.feedback.show(error.error?.message ?? 'No se pudo iniciar la importación.'),
     });
   }
 
@@ -502,12 +406,8 @@ export class ImportAssignment implements OnDestroy {
           return;
         }
 
-        // A page refresh must not hide an import that is waiting for the
-        // explicit replacement confirmation, or one still being validated.
         if (this.current() === null) {
-          const resumable = response.data.find(
-            (item) => item.status === 'validated' || this.isInProgress(item.status),
-          );
+          const resumable = response.data.find((item) => this.isInProgress(item.status));
           if (resumable) this.restoreImport(resumable);
         }
       },
@@ -517,7 +417,7 @@ export class ImportAssignment implements OnDestroy {
 
   showDetail(item: ImportRecord): void {
     this.detail.set(item);
-    if (item.status === 'validated' || this.isInProgress(item.status)) this.restoreImport(item);
+    if (this.isInProgress(item.status)) this.restoreImport(item);
   }
 
   statusLabel(status: ImportStatus): string {
@@ -527,38 +427,31 @@ export class ImportAssignment implements OnDestroy {
       validated: 'Validado',
       processing: 'Procesando',
       completed: 'Completado',
+      completed_with_errors: 'Completado con errores',
       failed: 'Fallido',
       cancelled: 'Cancelado',
     }[status];
   }
 
-  stageDescription(status: ImportStatus): string {
-    return {
-      uploaded: 'El archivo está en espera de validación.',
-      validating: 'Validando estructura y cargando staging de forma segura.',
-      validated: 'Archivo validado. Puedes confirmar el reemplazo del periodo.',
-      processing: 'Reemplazando la asignación de forma atómica.',
-      completed: 'La asignación quedó disponible para Analytics.',
-      failed: 'No se realizaron cambios en la asignación.',
-      cancelled: 'La importación fue cancelada.',
-    }[status];
+  resultTitle(status: ImportStatus): string {
+    if (this.isInProgress(status) || status === 'validated') return 'Procesando archivo...';
+    if (status === 'completed_with_errors') return 'Importación completada con errores';
+    if (status === 'completed') return 'Importación completada';
+    return 'No se pudo importar el archivo';
   }
 
-  stageDone(stage: 'received' | 'structure' | 'validated' | 'processing' | 'completed'): boolean {
-    const status = this.current()?.status;
-    const order: Record<ImportStatus, number> = {
-      uploaded: 1,
-      validating: 2,
-      validated: 3,
-      processing: 4,
-      completed: 5,
-      failed: 0,
-      cancelled: 0,
-    };
-    const expected = { received: 1, structure: 2, validated: 3, processing: 4, completed: 5 }[
-      stage
-    ];
-    return status !== undefined && order[status] >= expected;
+  resultDescription(record: ImportRecord): string {
+    if (this.isInProgress(record.status) || record.status === 'validated')
+      return 'El archivo se está validando y procesando automáticamente.';
+    if (record.status === 'completed_with_errors')
+      return `${this.number(record.rowsInserted)} filas fueron importadas correctamente y ${this.number(record.rowsRejected)} filas presentaron errores.`;
+    if (record.status === 'completed')
+      return `${this.number(record.rowsInserted)} filas fueron importadas correctamente.`;
+    return record.error ?? 'Verifica la estructura del archivo e inténtalo nuevamente.';
+  }
+
+  isCompleted(status: ImportStatus): boolean {
+    return status === 'completed' || status === 'completed_with_errors';
   }
 
   periodLabel(): string {
@@ -576,11 +469,6 @@ export class ImportAssignment implements OnDestroy {
     return new Intl.NumberFormat('es-PE').format(value);
   }
 
-  progressLabel(record: ImportRecord): string {
-    return record.rowsTotal === null
-      ? `Procesando ${this.number(record.rowsProcessed)} filas`
-      : `${record.progress}%`;
-  }
   fileSize(bytes: number): string {
     return bytes >= 1024 * 1024
       ? `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -647,10 +535,8 @@ export class ImportAssignment implements OnDestroy {
             this.pollSubscription?.unsubscribe();
             this.loadHistory();
             this.loadConfiguration();
-            if (record.status === 'completed')
-              this.feedback.show(
-                `Asignación ${this.current()?.period ?? ''} importada: ${this.number(record.rowsInserted)} filas.`,
-              );
+            if (this.isCompleted(record.status))
+              this.feedback.show(this.resultDescription({ ...this.current()!, ...record }));
           }
         },
         error: () => {
@@ -660,8 +546,13 @@ export class ImportAssignment implements OnDestroy {
       });
   }
 
-  private isInProgress(status: ImportStatus | undefined): boolean {
-    return status === 'uploaded' || status === 'validating' || status === 'processing';
+  isInProgress(status: ImportStatus | undefined): boolean {
+    return (
+      status === 'uploaded' ||
+      status === 'validating' ||
+      status === 'validated' ||
+      status === 'processing'
+    );
   }
 
   private applyStatus(status: ImportStatusRecord): void {
@@ -669,6 +560,20 @@ export class ImportAssignment implements OnDestroy {
     if (current?.id === status.id) {
       this.current.set({ ...current, ...status });
     }
+  }
+
+  downloadErrors(record: ImportRecord): void {
+    this.api.downloadErrors(record.id).subscribe({
+      next: (file) => {
+        const url = URL.createObjectURL(file);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `errores-asignacion-${record.id}.csv`;
+        link.click();
+        URL.revokeObjectURL(url);
+      },
+      error: () => this.feedback.show('No se pudo descargar el archivo de errores.'),
+    });
   }
 
   downloadTemplate(): void {

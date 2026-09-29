@@ -3,7 +3,7 @@ import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
 import { environment } from '../../../environments/environment';
 
-export type ImportStatus = 'uploaded' | 'validating' | 'validated' | 'processing' | 'completed' | 'failed' | 'cancelled';
+export type ImportStatus = 'uploaded' | 'validating' | 'validated' | 'processing' | 'completed' | 'completed_with_errors' | 'failed' | 'cancelled';
 
 export interface ImportError {
   row: number | null;
@@ -38,6 +38,7 @@ export interface ImportRecord {
   duplicates: number;
   errors: ImportError[];
   error: string | null;
+  hasErrorsFile: boolean;
   existingRows: number | null;
   createdBy: string | null;
   createdAt: string | null;
@@ -61,6 +62,7 @@ export type ImportStatusRecord = Pick<
   | 'startedAt'
   | 'finishedAt'
   | 'error'
+  | 'hasErrorsFile'
 >;
 
 @Injectable({ providedIn: 'root' })
@@ -74,16 +76,12 @@ export class ImportApiService {
     return this.http.get<ImportConfiguration>(`${this.importsUrl}/config`, { params: { period } });
   }
 
-  validate(period: string, file: File): Observable<ImportRecord> {
+  importAssignment(period: string, file: File): Observable<ImportRecord> {
     const data = new FormData();
     data.set('period', period);
     data.set('file', file);
 
     return this.http.post<ImportRecord>(`${this.assignmentUrl}/validar`, data);
-  }
-
-  import(importId: number): Observable<ImportRecord> {
-    return this.http.post<ImportRecord>(`${this.assignmentUrl}/importar`, { importId });
   }
 
   status(importId: number): Observable<ImportStatusRecord> {
@@ -94,6 +92,10 @@ export class ImportApiService {
     return this.http.get(`${this.assignmentUrl}/plantilla`, { responseType: 'blob' });
   }
 
+  downloadErrors(importId: number): Observable<Blob> {
+    return this.http.get(`${this.importsUrl}/${importId}/errores`, { responseType: 'blob' });
+  }
+
   history(type?: string): Observable<{ data: ImportRecord[] }> {
     return this.http.get<{ data: ImportRecord[] }>(`${environment.apiBaseUrl}/importaciones`, { params: type ? { type } : {} });
   }
@@ -102,14 +104,10 @@ export class ImportApiService {
     return this.http.get<ImportConfiguration>(`${this.importsUrl}/pagos/config`);
   }
 
-  validatePayments(file: File): Observable<ImportRecord> {
+  importPayments(file: File): Observable<ImportRecord> {
     const data = new FormData();
     data.set('file', file);
     return this.http.post<ImportRecord>(`${this.paymentsUrl}/validar`, data);
-  }
-
-  importPayments(importId: number): Observable<ImportRecord> {
-    return this.http.post<ImportRecord>(`${this.paymentsUrl}/importar`, { importId });
   }
 
   paymentTemplate(): Observable<Blob> {

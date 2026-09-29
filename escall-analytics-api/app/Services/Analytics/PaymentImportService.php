@@ -72,7 +72,7 @@ final class PaymentImportService
             $path = Storage::disk('local')->path($stored);
             $this->assertDelimitedTextFile($path, $file->getMimeType());
             $hash = hash_file('sha256', $path);
-            if (AnalyticsImport::query()->where('type', self::TYPE)->where('file_sha256', $hash)->where('status', 'completed')->exists()) {
+            if (AnalyticsImport::query()->where('type', self::TYPE)->where('file_sha256', $hash)->whereIn('status', ['completed', 'completed_with_errors'])->exists()) {
                 Storage::disk('local')->delete($stored);
                 throw new RuntimeException('Este archivo ya fue importado correctamente.');
             }
@@ -113,6 +113,7 @@ final class PaymentImportService
                 'validPayments' => $stats['validPayments'], 'validAmount' => $stats['validAmount'],
                 'byAgreement' => $stats['byAgreement'], 'errors' => array_slice($result['errors'], 0, 100),
             ],
+            'errorFile' => $result['errorFile'],
             'metrics' => [
                 'validationMs' => $this->milliseconds($started), 'streamingMs' => $result['streamingMs'],
                 'stagingMs' => $result['stagingMs'], 'stagingQueries' => $result['stagingQueries'],
@@ -120,12 +121,27 @@ final class PaymentImportService
                 'peakMemoryMb' => round(memory_get_peak_usage(true) / 1048576, 2),
             ],
         ];
-        $fatal = $result['fatal'];
+        $fatal = $result['fatal'] || $result['rowsTotal'] === 0;
+        if (! $fatal && $stats['validPayments'] === 0) {
+            $this->update($import, [
+                'rows_total' => $result['rowsTotal'], 'rows_processed' => $result['rowsTotal'],
+                'rows_inserted' => 0, 'rows_rejected' => $result['rowsRejected'], 'progress' => 100,
+                'status' => 'completed_with_errors', 'error_summary' => null,
+                'finished_at' => now(), 'metadata' => $metadata,
+            ]);
+            DB::table(self::STAGING_TABLE)->where('import_id', $import->id)->delete();
+            $this->deleteSourceFile($import);
+
+            return;
+        }
+
         $this->update($import, [
             'rows_total' => $result['rowsTotal'], 'rows_processed' => $result['rowsTotal'],
             'rows_inserted' => $stats['validPayments'], 'rows_rejected' => $result['rowsRejected'], 'progress' => 100,
             'status' => $fatal ? 'failed' : 'validated',
-            'error_summary' => $fatal ? 'El archivo no tiene una estructura válida.' : null,
+            'error_summary' => $fatal
+                ? ($result['rowsTotal'] === 0 ? 'El archivo no contiene filas de datos.' : 'El archivo no tiene una estructura válida.')
+                : null,
             'finished_at' => now(), 'metadata' => $metadata,
         ]);
     }
@@ -153,18 +169,16 @@ final class PaymentImportService
                 });
         }, 3);
         $stats = $this->stagingStats($import);
+        $rowsRejected = (int) $import->rows_rejected + max(0, $stats['validPayments'] - $inserted);
         $this->update($import, [
-            'status' => 'completed', 'progress' => 100, 'rows_processed' => (int) $import->rows_total,
-            'rows_inserted' => $inserted, 'rows_rejected' => (int) $import->rows_rejected + max(0, $stats['validPayments'] - $inserted),
+            'status' => $rowsRejected > 0 ? 'completed_with_errors' : 'completed', 'progress' => 100, 'rows_processed' => (int) $import->rows_total,
+            'rows_inserted' => $inserted, 'rows_rejected' => $rowsRejected,
             'finished_at' => now(),
             'metadata' => $this->metadata($import, ['metrics' => ['importMs' => $this->milliseconds($started), 'peakMemoryMb' => round(memory_get_peak_usage(true) / 1048576, 2)]]),
         ]);
         $cache->invalidate();
         DB::table(self::STAGING_TABLE)->where('import_id', $import->id)->delete();
-        if ($import->stored_filename !== null) {
-            Storage::disk('local')->delete($import->stored_filename);
-            $this->update($import, ['stored_filename' => null]);
-        }
+        $this->deleteSourceFile($import);
     }
 
     public function fail(AnalyticsImport $import, string $stage): void
@@ -177,7 +191,15 @@ final class PaymentImportService
 
     public function cleanup(int $hours): int
     {
-        $ids = AnalyticsImport::query()->where('type', self::TYPE)->whereIn('status', ['failed', 'cancelled'])->where('updated_at', '<', now()->subHours($hours))->pluck('id');
+        $imports = AnalyticsImport::query()->where('type', self::TYPE)->whereIn('status', ['failed', 'cancelled'])->where('updated_at', '<', now()->subHours($hours))->get(['id', 'metadata']);
+        $ids = $imports->pluck('id');
+
+        foreach ($imports as $import) {
+            $errorFile = (array) (($import->metadata ?? [])['errorFile'] ?? []);
+            if (isset($errorFile['storedFilename'])) {
+                Storage::disk('local')->delete((string) $errorFile['storedFilename']);
+            }
+        }
 
         $deleted = $ids->isEmpty() ? 0 : DB::table(self::STAGING_TABLE)->whereIn('import_id', $ids)->delete();
         // Keep maintenance safe even where a pre-existing MariaDB table did
@@ -189,7 +211,7 @@ final class PaymentImportService
         return $deleted;
     }
 
-    /** @return array{rowsTotal:int,rowsRejected:int,duplicates:int,errors:list<array{row:int|null,column:string,message:string}>,fatal:bool,streamingMs:int,stagingMs:int,stagingQueries:int} */
+    /** @return array{rowsTotal:int,rowsRejected:int,duplicates:int,errors:list<array{row:int|null,column:string,message:string}>,fatal:bool,errorFile:array{storedFilename:string,downloadFilename:string}|null,streamingMs:int,stagingMs:int,stagingQueries:int} */
     private function streamToStaging(AnalyticsImport $import, string $path): array
     {
         $started = microtime(true);
@@ -200,6 +222,8 @@ final class PaymentImportService
         $duplicates = 0;
         $errors = [];
         $batch = [];
+        $errorWriter = null;
+        $errorFile = null;
         $handle = fopen($path, 'rb');
         if ($handle === false) {
             throw new RuntimeException('No se pudo abrir el archivo.');
@@ -207,7 +231,7 @@ final class PaymentImportService
         try {
             $first = fgets($handle);
             if ($first === false) {
-                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors') + ['fatal' => true, 'streamingMs' => $this->milliseconds($started), 'stagingMs' => 0, 'stagingQueries' => 0];
+                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors', 'errorFile') + ['fatal' => true, 'streamingMs' => $this->milliseconds($started), 'stagingMs' => 0, 'stagingQueries' => 0];
             }
             $encoding = $this->detectEncoding($path);
             $delimiter = $this->detectDelimiter($this->text($first, $encoding));
@@ -217,8 +241,9 @@ final class PaymentImportService
             if ($headers !== self::HEADERS) {
                 $errors[] = ['row' => 1, 'column' => 'headers', 'message' => 'Los encabezados deben ser: '.implode(', ', self::HEADERS).'.'];
 
-                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors') + ['fatal' => true, 'streamingMs' => $this->milliseconds($started), 'stagingMs' => 0, 'stagingQueries' => 0];
+                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors', 'errorFile') + ['fatal' => true, 'streamingMs' => $this->milliseconds($started), 'stagingMs' => 0, 'stagingQueries' => 0];
             }
+            $errorWriter = ImportErrorCsvWriter::create($import->id, self::TYPE, self::HEADERS);
             $line = 1;
             $lastProgress = 0;
             $size = max(1, (int) filesize($path));
@@ -231,9 +256,9 @@ final class PaymentImportService
                 if (++$rowsTotal > (int) config('analytics.import_max_rows')) {
                     throw new RuntimeException('El archivo supera el máximo de filas permitido.');
                 }
-                $batch[] = $this->rawRow($import->id, $line, $values);
+                $batch[] = ['data' => $this->rawRow($import->id, $line, $values), 'source' => array_combine(self::HEADERS, array_pad($values, count(self::HEADERS), '')) ?: []];
                 if (count($batch) >= $this->chunkSize()) {
-                    [$rejected, $dupes, $queries, $elapsed, $newErrors] = $this->validateAndInsert($import, $batch);
+                    [$rejected, $dupes, $queries, $elapsed, $newErrors] = $this->validateAndInsert($import, $batch, $errorWriter);
                     $rowsRejected += $rejected;
                     $duplicates += $dupes;
                     $stagingQueries += $queries;
@@ -247,7 +272,7 @@ final class PaymentImportService
                 }
             }
             if ($batch !== []) {
-                [$rejected, $dupes, $queries, $elapsed, $newErrors] = $this->validateAndInsert($import, $batch);
+                [$rejected, $dupes, $queries, $elapsed, $newErrors] = $this->validateAndInsert($import, $batch, $errorWriter);
                 $rowsRejected += $rejected;
                 $duplicates += $dupes;
                 $stagingQueries += $queries;
@@ -256,15 +281,18 @@ final class PaymentImportService
             }
         } finally {
             fclose($handle);
+            if ($errorWriter !== null) {
+                $errorFile = $errorWriter->close();
+            }
         }
 
-        return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors') + ['fatal' => false, 'streamingMs' => $this->milliseconds($started), 'stagingMs' => $stagingMs, 'stagingQueries' => $stagingQueries];
+        return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors', 'errorFile') + ['fatal' => false, 'streamingMs' => $this->milliseconds($started), 'stagingMs' => $stagingMs, 'stagingQueries' => $stagingQueries];
     }
 
-    /** @param list<array<string,mixed>> $batch
+    /** @param list<array{data: array<string,mixed>, source: array<string,mixed>}> $batch
      * @return array{int,int,int,int,list<array{row:int|null,column:string,message:string}>}
      */
-    private function validateAndInsert(AnalyticsImport $import, array $batch): array
+    private function validateAndInsert(AnalyticsImport $import, array $batch, ImportErrorCsvWriter $errorWriter): array
     {
         $started = microtime(true);
         $errors = [];
@@ -272,7 +300,8 @@ final class PaymentImportService
         $duplicates = 0;
         $rejected = 0;
         $validCodes = [];
-        foreach ($batch as $row) {
+        $stagingRows = array_column($batch, 'data');
+        foreach ($stagingRows as $row) {
             if ($row['period'] !== null && $row['codigo_normalizado'] !== null && $row['error_message'] === null) {
                 $validCodes[$row['period']][] = $row['codigo_normalizado'];
             }
@@ -285,7 +314,7 @@ final class PaymentImportService
                 $assignments[$period.'|'.$row->conca] = $row->Documento_RUC;
             }
         }
-        $hashes = array_values(array_unique(array_filter(array_column($batch, 'logical_hash'))));
+        $hashes = array_values(array_unique(array_filter(array_column($stagingRows, 'logical_hash'))));
         $seen = $hashes === [] ? [] : array_fill_keys(DB::table(self::STAGING_TABLE)->where('import_id', $import->id)->whereIn('logical_hash', $hashes)->pluck('logical_hash')->all(), true);
         if ($hashes !== []) {
             $queries++;
@@ -294,8 +323,8 @@ final class PaymentImportService
         if ($hashes !== []) {
             // hash_fila predates Analytics in some installations, so compare
             // the five business fields as well as our logical hash.
-            $dates = array_values(array_unique(array_filter(array_column($batch, 'fecha_pago'))));
-            $codes = array_values(array_unique(array_filter(array_column($batch, 'codigo_normalizado'))));
+            $dates = array_values(array_unique(array_filter(array_column($stagingRows, 'fecha_pago'))));
+            $codes = array_values(array_unique(array_filter(array_column($stagingRows, 'codigo_normalizado'))));
             $existing = DB::table('pagos_expertis')->whereIn('hash_fila', $hashes)
                 ->orWhere(function ($query) use ($dates, $codes): void {
                     $query->whereIn('fecha', $dates)->whereIn('cuenta_normalizada', $codes);
@@ -306,7 +335,8 @@ final class PaymentImportService
                 $final[$this->logicalHash((string) $payment->fecha, (string) $payment->cuenta_normalizada, (string) $payment->monto, (string) $payment->ejecutivo, (string) $payment->tipo_acuerdo)] = true;
             }
         }
-        foreach ($batch as &$row) {
+        foreach ($batch as &$entry) {
+            $row = &$entry['data'];
             if ($row['error_message'] === null && ! isset($assignments[$row['period'].'|'.$row['codigo_normalizado']])) {
                 $row['error_message'] = 'El código no se encuentra en la asignación del periodo '.$row['period'].'.';
             }
@@ -325,11 +355,12 @@ final class PaymentImportService
             } else {
                 $rejected++;
                 $errors[] = ['row' => $row['row_number'], 'column' => 'registro', 'message' => $row['error_message']];
+                $errorWriter->append((int) $row['row_number'], $entry['source'], 'registro', (string) $row['error_message']);
             }
             $row['created_at'] = now();
             $row['updated_at'] = now();
-        } unset($row);
-        DB::table(self::STAGING_TABLE)->insert($batch);
+        } unset($entry, $row);
+        DB::table(self::STAGING_TABLE)->insert(array_column($batch, 'data'));
         $queries++;
 
         return [$rejected, $duplicates, $queries, $this->milliseconds($started), array_slice($errors, 0, 100)];
@@ -477,6 +508,16 @@ final class PaymentImportService
     private function metadata(AnalyticsImport $import, array $extra): array
     {
         return array_replace_recursive((array) $import->metadata, $extra);
+    }
+
+    private function deleteSourceFile(AnalyticsImport $import): void
+    {
+        if ($import->stored_filename === null) {
+            return;
+        }
+
+        Storage::disk('local')->delete($import->stored_filename);
+        $this->update($import, ['stored_filename' => null]);
     }
 
     private function milliseconds(float $started): int

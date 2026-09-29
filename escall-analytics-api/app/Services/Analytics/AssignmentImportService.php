@@ -153,15 +153,50 @@ final class AssignmentImportService
                 $this->appendError($errors, null, 'archivo', 'La cantidad cargada en staging no coincide con el archivo.');
             }
 
-            if ($errors !== [] || $stream['rowsTotal'] !== $stats['rows'] + $stream['rowsRejected']) {
+            if ($stream['fatal'] || $stream['rowsTotal'] === 0 || $stream['rowsTotal'] !== $stats['rows'] + $stream['rowsRejected']) {
                 $this->completeValidationFailure($import, [
                     'rowsTotal' => $stream['rowsTotal'],
                     'rowsRejected' => $stream['rowsRejected'],
                     'clients' => $stats['clients'],
                     'accounts' => $stats['accounts'],
                     'duplicates' => $stream['duplicates'],
-                    'errors' => $errors,
+                    'errors' => $stream['rowsTotal'] === 0 && $errors === []
+                        ? [['row' => 1, 'column' => 'archivo', 'message' => 'El archivo no contiene filas de datos.']]
+                        : $errors,
                 ], $startedAt);
+
+                return;
+            }
+
+            $metadata = $this->metadata($import, [
+                'validation' => [
+                    'clients' => $stats['clients'],
+                    'accounts' => $stats['accounts'],
+                    'duplicates' => $stream['duplicates'],
+                    'errors' => $errors,
+                ],
+                'errorFile' => $stream['errorFile'],
+                'metrics' => [
+                    ...$stream['metrics'],
+                    'validationMs' => $this->milliseconds($startedAt),
+                    'rowsPerSecond' => $stream['rowsTotal'] > 0 ? round($stream['rowsTotal'] / max(0.001, $this->milliseconds($startedAt) / 1000), 2) : 0,
+                    'peakMemoryMb' => $this->peakMemoryMb(),
+                ],
+            ]);
+
+            if ($stats['rows'] === 0) {
+                $this->updateImport($import, [
+                    'rows_total' => $stream['rowsTotal'],
+                    'rows_processed' => $stream['rowsTotal'],
+                    'rows_inserted' => 0,
+                    'rows_rejected' => $stream['rowsRejected'],
+                    'progress' => 100,
+                    'status' => 'completed_with_errors',
+                    'error_summary' => null,
+                    'finished_at' => now(),
+                    'metadata' => $metadata,
+                ]);
+                $this->deleteSourceFile($import);
 
                 return;
             }
@@ -170,25 +205,12 @@ final class AssignmentImportService
                 'rows_total' => $stream['rowsTotal'],
                 'rows_processed' => $stream['rowsTotal'],
                 'rows_inserted' => $stats['rows'],
-                'rows_rejected' => 0,
+                'rows_rejected' => $stream['rowsRejected'],
                 'progress' => 100,
                 'status' => 'validated',
                 'error_summary' => null,
                 'finished_at' => now(),
-                'metadata' => $this->metadata($import, [
-                    'validation' => [
-                        'clients' => $stats['clients'],
-                        'accounts' => $stats['accounts'],
-                        'duplicates' => $stream['duplicates'],
-                        'errors' => [],
-                    ],
-                    'metrics' => [
-                        ...$stream['metrics'],
-                        'validationMs' => $this->milliseconds($startedAt),
-                        'rowsPerSecond' => $stream['rowsTotal'] > 0 ? round($stream['rowsTotal'] / max(0.001, $this->milliseconds($startedAt) / 1000), 2) : 0,
-                        'peakMemoryMb' => $this->peakMemoryMb(),
-                    ],
-                ]),
+                'metadata' => $metadata,
             ]);
         } catch (Throwable $exception) {
             throw $exception;
@@ -202,10 +224,11 @@ final class AssignmentImportService
         }
 
         $startedAt = microtime(true);
+        $expectedStagingRows = (int) $import->rows_inserted;
         $this->markProgress($import, 'processing', (int) $import->rows_total, (int) $import->rows_total, 0, now());
         $table = $this->assignmentTable();
         $stagingRows = (int) DB::table(self::STAGING_TABLE)->where('import_id', $import->id)->count();
-        if ($stagingRows !== (int) $import->rows_total) {
+        if ($stagingRows !== $expectedStagingRows) {
             throw new RuntimeException('El staging no coincide con la validación aprobada.');
         }
 
@@ -228,9 +251,9 @@ final class AssignmentImportService
 
         $this->updateImport($import, [
             'rows_inserted' => $stats['rows'],
-            'rows_processed' => $stats['rows'],
+            'rows_processed' => (int) $import->rows_total,
             'progress' => 100,
-            'status' => 'completed',
+            'status' => $import->rows_rejected > 0 ? 'completed_with_errors' : 'completed',
             'finished_at' => now(),
             'metadata' => $this->metadata($import, [
                 'validation' => [
@@ -248,10 +271,7 @@ final class AssignmentImportService
 
         $cache->invalidate();
         DB::table(self::STAGING_TABLE)->where('import_id', $import->id)->delete();
-        if ($import->stored_filename !== null) {
-            Storage::disk('local')->delete($import->stored_filename);
-            $this->updateImport($import, ['stored_filename' => null]);
-        }
+        $this->deleteSourceFile($import);
     }
 
     public function fail(AnalyticsImport $import, string $message, string $stage): void
@@ -278,7 +298,7 @@ final class AssignmentImportService
         $imports = AnalyticsImport::query()
             ->whereIn('status', ['failed', 'cancelled'])
             ->where('updated_at', '<', now()->subHours($hours))
-            ->get(['id', 'stored_filename']);
+            ->get(['id', 'stored_filename', 'metadata']);
 
         if ($imports->isEmpty()) {
             return 0;
@@ -287,6 +307,10 @@ final class AssignmentImportService
         foreach ($imports as $import) {
             if ($import->stored_filename !== null) {
                 Storage::disk('local')->delete($import->stored_filename);
+            }
+            $errorFile = (array) (($import->metadata ?? [])['errorFile'] ?? []);
+            if (isset($errorFile['storedFilename'])) {
+                Storage::disk('local')->delete((string) $errorFile['storedFilename']);
             }
         }
         AnalyticsImport::query()->whereIn('id', $imports->pluck('id'))->update(['stored_filename' => null]);
@@ -315,7 +339,7 @@ final class AssignmentImportService
     }
 
     /**
-     * @return array{rowsTotal: int, rowsRejected: int, duplicates: int, errors: list<array{row: int|null, column: string, message: string}>, metrics: array<string, int|float>}
+     * @return array{rowsTotal: int, rowsRejected: int, duplicates: int, errors: list<array{row: int|null, column: string, message: string}>, fatal: bool, errorFile: array{storedFilename: string, downloadFilename: string}|null, metrics: array<string, int|float>}
      */
     private function streamToStaging(AnalyticsImport $import, string $path): array
     {
@@ -336,13 +360,15 @@ final class AssignmentImportService
         $lastReported = 0;
         $chunkSize = $this->stagingChunkSize();
         $fileSize = max(1, (int) filesize($path));
+        $errorWriter = null;
+        $errorFile = null;
 
         try {
             $firstLine = fgets($handle);
             if ($firstLine === false) {
                 $this->appendError($errors, 1, 'archivo', 'El archivo está vacío.');
 
-                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors') + ['metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
+                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors', 'errorFile') + ['fatal' => true, 'metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
             }
 
             $encoding = $this->detectEncoding($path);
@@ -352,7 +378,7 @@ final class AssignmentImportService
             if ($headers === false) {
                 $this->appendError($errors, 1, 'archivo', 'No se encontró una fila de headers válida.');
 
-                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors') + ['metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
+                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors', 'errorFile') + ['fatal' => true, 'metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
             }
 
             $headers = array_map(fn (?string $value): string => $this->normalizeText((string) $value, $encoding), $headers);
@@ -364,8 +390,10 @@ final class AssignmentImportService
                 }
             }
             if ($errors !== []) {
-                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors') + ['metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
+                return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors', 'errorFile') + ['fatal' => true, 'metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
             }
+
+            $errorWriter = ImportErrorCsvWriter::create($import->id, self::TYPE, $headers);
 
             $rowNumber = 1;
             while (($values = fgetcsv($handle, 0, $delimiter)) !== false) {
@@ -384,18 +412,22 @@ final class AssignmentImportService
                 $invalidNumericColumns = $this->normalizeNumericColumns($row);
                 if ($missing !== [] || $invalidNumericColumns !== []) {
                     $rowsRejected++;
+                    $messages = [];
                     foreach ($missing as $column) {
                         $this->appendError($errors, $rowNumber, $column, 'Valor obligatorio ausente.');
+                        $messages[] = "{$column}: Valor obligatorio ausente.";
                     }
                     foreach ($invalidNumericColumns as $column) {
                         $this->appendError($errors, $rowNumber, $column, 'El valor debe ser numérico o estar vacío.');
+                        $messages[] = "{$column}: El valor debe ser numérico o estar vacío.";
                     }
+                    $errorWriter->append($rowNumber, $this->sourceRow($headers, $values), implode(', ', [...$missing, ...$invalidNumericColumns]), implode(' ', $messages));
                 } else {
-                    $batch[] = ['rowNumber' => $rowNumber, 'data' => ['import_id' => $import->id, 'period' => $import->period, ...$row]];
+                    $batch[] = ['rowNumber' => $rowNumber, 'data' => ['import_id' => $import->id, 'period' => $import->period, ...$row], 'source' => $this->sourceRow($headers, $values)];
                 }
 
                 if (count($batch) >= $chunkSize) {
-                    [$written, $duplicatesInBatch, $queries, $elapsed] = $this->insertStagingBatch($import, $batch, $errors);
+                    [$written, $duplicatesInBatch, $queries, $elapsed] = $this->insertStagingBatch($import, $batch, $errors, $errorWriter);
                     $inserted += $written;
                     $duplicates += $duplicatesInBatch;
                     $rowsRejected += $duplicatesInBatch;
@@ -411,7 +443,7 @@ final class AssignmentImportService
             }
 
             if ($batch !== []) {
-                [$written, $duplicatesInBatch, $queries, $elapsed] = $this->insertStagingBatch($import, $batch, $errors);
+                [$written, $duplicatesInBatch, $queries, $elapsed] = $this->insertStagingBatch($import, $batch, $errors, $errorWriter);
                 $inserted += $written;
                 $duplicates += $duplicatesInBatch;
                 $rowsRejected += $duplicatesInBatch;
@@ -421,17 +453,20 @@ final class AssignmentImportService
             $this->markStreamingProgress($import, $rowsTotal, $inserted, $rowsRejected, $fileSize, $fileSize);
         } finally {
             fclose($handle);
+            if ($errorWriter !== null) {
+                $errorFile = $errorWriter->close();
+            }
         }
 
-        return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors') + ['metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
+        return compact('rowsTotal', 'rowsRejected', 'duplicates', 'errors', 'errorFile') + ['fatal' => false, 'metrics' => $this->streamMetrics($startedAt, $stagingMs, $stagingQueries)];
     }
 
     /**
-     * @param  list<array{rowNumber: int, data: array<string, mixed>}>  $batch
+     * @param  list<array{rowNumber: int, data: array<string, mixed>, source: array<string, mixed>}>  $batch
      * @param  list<array{row: int|null, column: string, message: string}>  $errors
      * @return array{int, int, int, int}
      */
-    private function insertStagingBatch(AnalyticsImport $import, array $batch, array &$errors): array
+    private function insertStagingBatch(AnalyticsImport $import, array $batch, array &$errors, ImportErrorCsvWriter $errorWriter): array
     {
         $startedAt = microtime(true);
         $queries = 1;
@@ -458,6 +493,7 @@ final class AssignmentImportService
             if (isset($existingLookup[$account]) || isset($batchLookup[$account])) {
                 $duplicates++;
                 $this->appendError($errors, $entry['rowNumber'], 'conca', 'Cuenta duplicada para el periodo seleccionado.');
+                $errorWriter->append($entry['rowNumber'], $entry['source'], 'conca', 'Cuenta duplicada para el periodo seleccionado.');
 
                 continue;
             }
@@ -719,7 +755,7 @@ final class AssignmentImportService
 
     private function isCompletedDuplicate(string $period, string $hash): bool
     {
-        return AnalyticsImport::query()->where('type', self::TYPE)->where('period', $period)->where('file_sha256', $hash)->where('status', 'completed')->exists();
+        return AnalyticsImport::query()->where('type', self::TYPE)->where('period', $period)->where('file_sha256', $hash)->whereIn('status', ['completed', 'completed_with_errors'])->exists();
     }
 
     private function assignmentTable(): string
@@ -754,6 +790,30 @@ final class AssignmentImportService
         $allowed = ['text/csv', 'text/plain', 'application/csv', 'application/vnd.ms-excel'];
 
         return in_array($mime, $allowed, true);
+    }
+
+    /** @param list<string> $headers
+     * @param  list<string>  $values
+     * @return array<string, string>
+     */
+    private function sourceRow(array $headers, array $values): array
+    {
+        $row = [];
+        foreach ($headers as $index => $header) {
+            $row[$header] = $values[$index] ?? '';
+        }
+
+        return $row;
+    }
+
+    private function deleteSourceFile(AnalyticsImport $import): void
+    {
+        if ($import->stored_filename === null) {
+            return;
+        }
+
+        Storage::disk('local')->delete($import->stored_filename);
+        $this->updateImport($import, ['stored_filename' => null]);
     }
 
     /** @param array<string, mixed> $replacement

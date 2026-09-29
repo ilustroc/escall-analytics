@@ -13,8 +13,10 @@ use App\Services\Analytics\AnalyticsAuditService;
 use App\Services\Analytics\AssignmentImportService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 final class ExpertisAssignmentImportController extends Controller
 {
@@ -77,6 +79,21 @@ final class ExpertisAssignmentImportController extends Controller
         return response()->json($this->statusResource($import));
     }
 
+    public function errors(AnalyticsImport $import): StreamedResponse|JsonResponse
+    {
+        $errorFile = (array) (($import->metadata ?? [])['errorFile'] ?? []);
+        $storedFilename = (string) ($errorFile['storedFilename'] ?? '');
+        if ($storedFilename === '' || ! Storage::disk('local')->exists($storedFilename)) {
+            return response()->json(['message' => 'No hay un archivo de errores disponible para esta importación.'], 404);
+        }
+
+        return Storage::disk('local')->download(
+            $storedFilename,
+            (string) ($errorFile['downloadFilename'] ?? 'errores-importacion.csv'),
+            ['Content-Type' => 'text/csv; charset=UTF-8', 'Cache-Control' => 'no-store'],
+        );
+    }
+
     public function template(AssignmentImportService $imports): Response
     {
         return response($imports->templateCsv(), 200, [
@@ -120,6 +137,7 @@ final class ExpertisAssignmentImportController extends Controller
             'duplicates' => (int) ($validation['duplicates'] ?? 0),
             'errors' => array_slice((array) ($validation['errors'] ?? []), 0, 100),
             'error' => $import->error_summary,
+            'hasErrorsFile' => isset($metadata['errorFile']['storedFilename']),
             'existingRows' => $includeExistingRows && $import->type === AssignmentImportService::TYPE ? $imports->existingRows($import->period) : null,
             'createdBy' => $import->creator?->name,
             'createdAt' => $import->created_at?->toIso8601String(),
@@ -132,7 +150,7 @@ final class ExpertisAssignmentImportController extends Controller
         ];
     }
 
-    /** @return array<string, int|string|null> */
+    /** @return array<string, int|string|bool|null> */
     private function statusResource(AnalyticsImport $import): array
     {
         return [
@@ -146,6 +164,7 @@ final class ExpertisAssignmentImportController extends Controller
             'startedAt' => $import->started_at?->toIso8601String(),
             'finishedAt' => $import->finished_at?->toIso8601String(),
             'error' => $import->error_summary,
+            'hasErrorsFile' => isset(((array) $import->metadata)['errorFile']['storedFilename']),
         ];
     }
 }

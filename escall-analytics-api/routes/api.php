@@ -43,6 +43,7 @@ Route::prefix('v1')->middleware('security.headers')->group(function (): void {
                 Route::get('imports/config', [ExpertisAssignmentImportController::class, 'configuration']);
                 Route::get('imports/pagos/config', [ExpertisPaymentImportController::class, 'configuration']);
                 Route::get('imports/{import}', [ExpertisAssignmentImportController::class, 'show']);
+                Route::get('imports/{import}/errores', [ExpertisAssignmentImportController::class, 'errors']);
                 Route::get('importaciones', [ExpertisAssignmentImportController::class, 'history']);
                 Route::get('importaciones/expertis/asignacion/plantilla', [ExpertisAssignmentImportController::class, 'template']);
                 Route::post('importaciones/expertis/asignacion/validar', [ExpertisAssignmentImportController::class, 'validateFile']);

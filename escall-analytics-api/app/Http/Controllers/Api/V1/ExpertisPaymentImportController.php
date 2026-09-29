@@ -72,7 +72,7 @@ final class ExpertisPaymentImportController extends Controller
             'rowsProcessed' => (int) $import->rows_processed, 'rowsInserted' => (int) $import->rows_inserted, 'rowsRejected' => (int) $import->rows_rejected,
             'clients' => (int) ($validation['clients'] ?? 0), 'accounts' => (int) ($validation['accounts'] ?? 0), 'duplicates' => (int) ($validation['duplicates'] ?? 0),
             'validAmount' => (float) ($validation['validAmount'] ?? 0), 'byAgreement' => (array) ($validation['byAgreement'] ?? []), 'errors' => array_slice((array) ($validation['errors'] ?? []), 0, 100),
-            'error' => $import->error_summary, 'createdAt' => $import->created_at?->toIso8601String(), 'startedAt' => $import->started_at?->toIso8601String(), 'finishedAt' => $import->finished_at?->toIso8601String(),
+            'error' => $import->error_summary, 'hasErrorsFile' => isset(((array) $import->metadata)['errorFile']['storedFilename']), 'createdAt' => $import->created_at?->toIso8601String(), 'startedAt' => $import->started_at?->toIso8601String(), 'finishedAt' => $import->finished_at?->toIso8601String(),
             'durationSeconds' => $import->started_at?->diffInSeconds($import->finished_at ?? now()), 'metrics' => (array) (($import->metadata ?? [])['metrics'] ?? []),
         ];
     }

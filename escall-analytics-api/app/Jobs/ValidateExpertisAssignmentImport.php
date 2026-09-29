@@ -34,8 +34,11 @@ final class ValidateExpertisAssignmentImport implements ShouldQueue
 
         $imports->validate($import);
         $import->refresh();
+        if ($import->status === 'validated') {
+            ProcessExpertisAssignmentImport::dispatch($import->id)->onQueue('imports');
+        }
         $audit->logImport(
-            $import->status === 'validated' ? 'assignment_import_validated' : 'assignment_import_failed',
+            $import->status === 'failed' ? 'assignment_import_failed' : 'assignment_import_validated',
             $import,
             ['stage' => 'validation'],
         );
@@ -44,7 +47,7 @@ final class ValidateExpertisAssignmentImport implements ShouldQueue
     public function failed(Throwable $exception): void
     {
         $import = AnalyticsImport::query()->find($this->importId);
-        if ($import !== null && ! in_array($import->status, ['completed', 'failed'], true)) {
+        if ($import !== null && ! in_array($import->status, ['completed', 'completed_with_errors', 'failed'], true)) {
             app(AssignmentImportService::class)->fail($import, 'No se pudo validar el archivo de asignación.', 'validation');
             app(AnalyticsAuditService::class)->logImport('assignment_import_failed', $import, ['stage' => 'validation']);
         }
