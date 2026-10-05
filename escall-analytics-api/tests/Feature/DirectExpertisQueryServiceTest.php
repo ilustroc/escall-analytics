@@ -170,6 +170,18 @@ final class DirectExpertisQueryServiceTest extends TestCase
             $table->unsignedInteger('peso');
             $table->boolean('activo')->default(true);
         });
+        Schema::create('llamadas', function (Blueprint $table): void {
+            $table->id();
+            $table->dateTime('fecha_gestion');
+            $table->string('documento')->nullable();
+            $table->string('cliente')->nullable();
+            $table->string('cartera')->nullable();
+            $table->string('usuario')->nullable();
+            $table->string('telefono')->nullable();
+            $table->string('resultado')->nullable();
+            $table->string('tipo_gestion')->nullable();
+            $table->text('observacion')->nullable();
+        });
     }
 
     private function seedSourceRows(): void

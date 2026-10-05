@@ -14,6 +14,9 @@ final class ReportQueryService
     private const GESTION_SORTS = ['idGestion' => 'g.id', 'dni' => 'g.dni_normalizado', 'asesor' => 'g.nombre', 'fechaLlamada' => 'g.fecha_gestion', 'nivel1' => 'g.status', 'nivel2' => 'g.tipificacion', 'monto' => 'g.monto_pago'];
 
     /** @var array<string, string> */
+    private const GESTION_EXPORT_SORTS = ['idGestion' => 'id_gestion', 'dni' => 'dni', 'asesor' => 'asesor', 'fechaLlamada' => 'fecha_llamada', 'nivel1' => 'nivel1', 'nivel2' => 'nivel2', 'monto' => 'monto'];
+
+    /** @var array<string, string> */
     private const PAYMENT_SORTS = ['fechaPago' => 'p.fecha', 'codigo' => 'p.cuenta_normalizada', 'dni' => 'p.dni', 'monto' => 'p.monto', 'ejecutivo' => 'p.ejecutivo', 'tipoAcuerdo' => 'p.tipo_acuerdo'];
 
     public function __construct(private readonly ExpertisQueryService $gestiones) {}
@@ -36,7 +39,7 @@ final class ReportQueryService
      */
     public function gestionExport(array $filters, string $sort, string $direction): Generator
     {
-        foreach ($this->orderGestiones($this->gestionSource($filters), $sort, $direction)->cursor()->chunk(500) as $chunk) {
+        foreach ($this->orderGestionExport($this->gestionExportSource($filters), $sort, $direction)->cursor()->chunk(500) as $chunk) {
             foreach ($this->enrichGestionRows(collect($chunk)) as $row) {
                 yield $row;
             }
@@ -110,6 +113,59 @@ final class ReportQueryService
     }
 
     /** @param array<string, mixed> $filters */
+    private function gestionExportSource(array $filters): Builder
+    {
+        $manual = $this->manualExportSource($filters);
+        $discador = $this->discadorExportSource($filters);
+
+        return DB::query()
+            ->fromRaw('('.$manual->toSql().' UNION ALL '.$discador->toSql().') as gestion_export')
+            ->mergeBindings($manual)
+            ->mergeBindings($discador)
+            ->select('gestion_export.*');
+    }
+
+    /** @param array<string, mixed> $filters */
+    private function manualExportSource(array $filters): Builder
+    {
+        return $this->gestionSource($filters)->addSelect([
+            DB::raw('NULL as nombre_cliente'),
+            DB::raw('NULL as cartera'),
+            DB::raw('NULL as cosecha'),
+        ]);
+    }
+
+    /** @param array<string, mixed> $filters */
+    private function discadorExportSource(array $filters): Builder
+    {
+        $query = DB::table('llamadas as l')->selectRaw(<<<'SQL'
+            l.id as id_gestion,
+            'ESCALL' as canal_gestion,
+            'ESCALL' as canal_asignacion,
+            TRIM(l.documento) as dni,
+            UPPER(COALESCE(NULLIF(TRIM(l.usuario), ''), 'MARCADOR')) as asesor,
+            'KATHERINE HUAMAN' as equipo,
+            l.telefono as telefono,
+            DATE(l.fecha_gestion) as fecha_llamada,
+            TIME(l.fecha_gestion) as hora,
+            l.tipo_gestion as nivel1,
+            l.resultado as nivel2,
+            NULL as fecha_compromiso,
+            0 as monto,
+            l.observacion as observacion,
+            'DISCADOR' as medio_gestion,
+            l.cliente as nombre_cliente,
+            NULL as cartera,
+            NULL as cosecha
+        SQL);
+
+        $query->where('l.fecha_gestion', '>=', $filters['fechaDesde'])
+            ->where('l.fecha_gestion', '<', CarbonImmutable::parse((string) $filters['fechaHasta'])->addDay()->toDateString());
+
+        return $query;
+    }
+
+    /** @param array<string, mixed> $filters */
     private function paymentSource(array $filters): Builder
     {
         $query = DB::table('pagos_expertis as p')->select(['p.id', 'p.fecha as fecha_pago', 'p.cuenta_normalizada as codigo', 'p.dni', 'p.monto', 'p.ejecutivo', 'p.tipo_acuerdo'])
@@ -140,6 +196,13 @@ final class ReportQueryService
         return $query->orderBy(self::GESTION_SORTS[$sort] ?? self::GESTION_SORTS['fechaLlamada'], $direction)->orderByDesc('g.id');
     }
 
+    private function orderGestionExport(Builder $query, string $sort, string $direction): Builder
+    {
+        $column = self::GESTION_EXPORT_SORTS[$sort] ?? self::GESTION_EXPORT_SORTS['fechaLlamada'];
+
+        return $query->orderBy($column, $direction)->orderByDesc('id_gestion');
+    }
+
     private function orderPayments(Builder $query, string $sort, string $direction): Builder
     {
         return $query->orderBy(self::PAYMENT_SORTS[$sort] ?? self::PAYMENT_SORTS['fechaPago'], $direction)->orderByDesc('p.id');
@@ -150,12 +213,84 @@ final class ReportQueryService
      */
     private function enrichGestionRows(Collection $rows): Collection
     {
-        $rows = $this->gestiones->enrichDetails($rows);
-        $weights = DB::table('tipificaciones_expertis')->whereIn('tipificacion', $rows->pluck('nivel2')->unique()->values()->all())->pluck('peso', 'tipificacion');
+        $manualRows = $rows->filter(static fn (object $row): bool => $row->medio_gestion === 'MANUAL');
+        if ($manualRows->isNotEmpty()) {
+            $this->gestiones->enrichDetails($manualRows);
+        }
 
-        return $rows->each(static function (object $row) use ($weights): void {
+        $discadorRows = $rows->filter(static fn (object $row): bool => $row->medio_gestion === 'DISCADOR');
+        if ($discadorRows->isNotEmpty()) {
+            $this->enrichDiscadorRows($discadorRows);
+        }
+
+        $weightKeys = $manualRows->pluck('nivel2')->unique()->values()->all();
+        $weights = DB::table('tipificaciones_expertis')->whereIn('tipificacion', $weightKeys)->pluck('peso', 'tipificacion');
+
+        return $rows->each(function (object $row) use ($weights): void {
+            if ($row->medio_gestion === 'DISCADOR') {
+                $row->puntaje = $this->discadorScore($row);
+
+                return;
+            }
+
             $row->puntaje = (int) ($weights[$row->nivel2] ?? 0);
         });
+    }
+
+    /** @param Collection<int, object> $rows */
+    private function enrichDiscadorRows(Collection $rows): void
+    {
+        $assignmentByPeriodAndDni = [];
+
+        foreach ($rows->groupBy(fn (object $row): string => CarbonImmutable::parse((string) $row->fecha_llamada)->format('Ym')) as $period => $periodRows) {
+            $dnis = $periodRows->pluck('dni')->filter(static fn (mixed $dni): bool => trim((string) $dni) !== '')->unique()->values()->all();
+            if ($dnis === []) {
+                continue;
+            }
+
+            $assignments = DB::table(config('analytics.assignment_table').' as a')
+                ->select(['a.documento_normalizado', 'a.CARTERA as cartera', 'a.cosecha'])
+                ->where('a.FEC_PRO', $period)
+                ->whereIn('a.documento_normalizado', $dnis)
+                ->get()
+                ->groupBy('documento_normalizado');
+
+            foreach ($assignments as $dni => $matches) {
+                $carteras = $matches->pluck('cartera')
+                    ->filter(static fn (mixed $value): bool => trim((string) $value) !== '')
+                    ->map(static fn (mixed $value): string => strtoupper(trim((string) $value)))
+                    ->unique()
+                    ->values();
+                $cosechas = $matches->pluck('cosecha')
+                    ->filter(static fn (mixed $value): bool => trim((string) $value) !== '')
+                    ->map(static fn (mixed $value): string => trim((string) $value))
+                    ->unique()
+                    ->values();
+
+                $assignmentByPeriodAndDni[$period.'|'.$dni] = [
+                    'cartera' => $carteras->count() > 1 ? 'MULTICARTERA' : $carteras->first(),
+                    'cosecha' => $cosechas->count() > 1 ? 'MULTICOSECHA' : $cosechas->first(),
+                ];
+            }
+        }
+
+        $rows->each(function (object $row) use ($assignmentByPeriodAndDni): void {
+            $key = CarbonImmutable::parse((string) $row->fecha_llamada)->format('Ym').'|'.$row->dni;
+            $assignment = $assignmentByPeriodAndDni[$key] ?? null;
+            $row->cartera = $assignment['cartera'] ?? null;
+            $row->cosecha = $assignment['cosecha'] ?? null;
+        });
+    }
+
+    private function discadorScore(object $row): ?int
+    {
+        return match (strtoupper(trim((string) $row->nivel2))) {
+            'NO CONTESTA' => 15,
+            'ABANDONO' => 16,
+            'BUZON' => 17,
+            'FALLADO' => 18,
+            default => null,
+        };
     }
 
     /** @param array<string, mixed> $filters

@@ -163,7 +163,7 @@ final class ExpertisQueryService
             g.fecha_gestion as fecha_llamada,
             CASE
                 WHEN g.observacion REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' THEN SUBSTR(g.observacion, 12, 8)
-                WHEN g.observacion REGEXP '^[0-9]{2}:[0-9]{2}:[0-9]{2}' THEN LEFT(g.observacion, 8)
+                WHEN g.observacion REGEXP '^[0-9]{2}:[0-9]{2}:[0-9]{2}' THEN SUBSTR(g.observacion, 1, 8)
                 ELSE NULL
             END as hora,
             g.status as nivel1,

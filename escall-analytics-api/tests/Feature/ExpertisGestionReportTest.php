@@ -7,6 +7,7 @@ use App\Mail\ExpertisGestionReportMail;
 use App\Models\AnalyticsAuditLog;
 use App\Services\Analytics\AnalyticsAuditService;
 use App\Services\Analytics\GestionCsvExportService;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
@@ -45,6 +46,7 @@ final class ExpertisGestionReportTest extends TestCase
             $mail->assertHasCc('katherine.supervision@escallperu.com');
             $mail->assertHasCc('cespinozag@escallperu.com');
             $mail->assertHasSubject('Reporte de Gestiones – Expertis | 01 al 23 de septiembre de 2026');
+            $this->assertStringContainsString('gestiones manuales y llamadas realizadas mediante discador', $mail->render());
 
             return count($mail->attachments()) === 1;
         });
@@ -81,6 +83,58 @@ final class ExpertisGestionReportTest extends TestCase
 
         Mail::assertNothingSent();
         Storage::disk('local')->assertMissing('reports/expertis/Reporte_Gestiones_Expertis_20260901_20260923.csv');
+    }
+
+    public function test_report_consolidates_manual_and_discador_without_losing_or_multiplying_calls(): void
+    {
+        $this->seedGestion();
+        DB::table('Asignacion_Expertis_Historico')->insert([
+            ['FEC_PRO' => '202609', 'Documento_RUC' => '87654321', 'documento_normalizado' => '87654321', 'NombreDeudor' => 'Asignacion Septiembre', 'CARTERA' => 'OH', 'cosecha' => 'COSECHA A', 'Canal' => 'ESCALL', 'conca' => '2-A'],
+            ['FEC_PRO' => '202609', 'Documento_RUC' => '87654321', 'documento_normalizado' => '87654321', 'NombreDeudor' => 'Asignacion Septiembre', 'CARTERA' => 'OH', 'cosecha' => 'COSECHA B', 'Canal' => 'ESCALL', 'conca' => '2-B'],
+            ['FEC_PRO' => '202608', 'Documento_RUC' => '11111111', 'documento_normalizado' => '11111111', 'NombreDeudor' => 'Asignacion Antigua', 'CARTERA' => 'ANTERIOR', 'cosecha' => 'COSECHA ANTIGUA', 'Canal' => 'ESCALL', 'conca' => '3-A'],
+        ]);
+        DB::table('llamadas')->insert([
+            ['id' => 10, 'fecha_gestion' => '2026-09-23 10:11:12', 'documento' => '87654321', 'cliente' => 'Cliente Discador', 'cartera' => 'EXPERTIS_OCTUBRE_2026', 'usuario' => '  ', 'telefono' => '900000010', 'resultado' => 'BUZON', 'tipo_gestion' => 'NO CONTACTO', 'observacion' => 'Buzon discador'],
+            ['id' => 11, 'fecha_gestion' => '2026-09-24 11:12:13', 'documento' => '11111111', 'cliente' => 'Cliente Sin Asignacion', 'cartera' => 'MULTI_AGOSTO_2026', 'usuario' => 'ana asesora', 'telefono' => '900000011', 'resultado' => 'NO CONTESTA', 'tipo_gestion' => 'NO CONTACTO', 'observacion' => 'Sin asignacion del mes'],
+            ['id' => 13, 'fecha_gestion' => '2026-09-25 12:13:14', 'documento' => '33333333', 'cliente' => 'Cliente Abandono', 'cartera' => 'OPERATIVA', 'usuario' => 'asesor', 'telefono' => '900000013', 'resultado' => 'ABANDONO', 'tipo_gestion' => 'NO CONTACTO', 'observacion' => 'Abandono'],
+            ['id' => 14, 'fecha_gestion' => '2026-09-26 13:14:15', 'documento' => '44444444', 'cliente' => 'Cliente Fallado', 'cartera' => 'OPERATIVA', 'usuario' => 'asesor', 'telefono' => '900000014', 'resultado' => 'FALLADO', 'tipo_gestion' => 'NO CONTACTO', 'observacion' => 'Fallado'],
+            ['id' => 12, 'fecha_gestion' => '2026-10-01 00:00:00', 'documento' => '22222222', 'cliente' => 'Fuera de rango', 'cartera' => 'FUERA', 'usuario' => 'asesor', 'telefono' => '900000012', 'resultado' => 'BUZON', 'tipo_gestion' => 'NO CONTACTO', 'observacion' => 'No debe salir'],
+        ]);
+
+        $report = app(GestionCsvExportService::class)->createPrivateReport(CarbonImmutable::parse('2026-09-30'));
+        $contents = Storage::disk('local')->get($report['path']);
+        $lines = preg_split('/\r\n|\r|\n/', $contents);
+        $headers = str_getcsv(substr(array_shift($lines), 3), ';');
+        $records = collect(array_filter($lines, static fn (string $line): bool => $line !== ''))
+            ->map(fn (string $line): array => array_combine($headers, str_getcsv($line, ';')))
+            ->keyBy('ID Gestion');
+
+        $this->assertStringStartsWith("\xEF\xBB\xBF", $contents);
+        $this->assertCount(19, $headers);
+        $this->assertSame(5, $report['rows']);
+        $this->assertCount(5, $records);
+        $this->assertSame('MANUAL', $records['1']['Medio Gestion']);
+        $this->assertSame('Cliente Uno', $records['1']['Nombre Cliente']);
+        $this->assertSame('DISCADOR', $records['10']['Medio Gestion']);
+        $this->assertSame('NO CONTACTO', $records['10']['Nivel 1']);
+        $this->assertSame('BUZON', $records['10']['Nivel 2']);
+        $this->assertSame('17', $records['10']['Puntaje']);
+        $this->assertSame('MARCADOR', $records['10']['Asesor']);
+        $this->assertSame('Cliente Discador', $records['10']['Nombre Cliente']);
+        $this->assertSame('OH', $records['10']['Cartera']);
+        $this->assertSame('MULTICOSECHA', $records['10']['Cosecha']);
+        $this->assertSame('NO CONTACTO', $records['11']['Nivel 1']);
+        $this->assertSame('NO CONTESTA', $records['11']['Nivel 2']);
+        $this->assertSame('', $records['11']['Cosecha']);
+        $this->assertSame('', $records['11']['Cartera']);
+        $this->assertSame('15', $records['11']['Puntaje']);
+        $this->assertSame('NO CONTACTO', $records['13']['Nivel 1']);
+        $this->assertSame('ABANDONO', $records['13']['Nivel 2']);
+        $this->assertSame('16', $records['13']['Puntaje']);
+        $this->assertSame('NO CONTACTO', $records['14']['Nivel 1']);
+        $this->assertSame('FALLADO', $records['14']['Nivel 2']);
+        $this->assertSame('18', $records['14']['Puntaje']);
+        $this->assertArrayNotHasKey('12', $records);
     }
 
     public function test_send_command_only_enqueues_the_report_job(): void
@@ -134,6 +188,18 @@ final class ExpertisGestionReportTest extends TestCase
             $table->string('gestion');
             $table->unsignedInteger('peso');
             $table->boolean('activo')->default(true);
+        });
+        Schema::create('llamadas', static function (Blueprint $table): void {
+            $table->id();
+            $table->dateTime('fecha_gestion');
+            $table->string('documento')->nullable();
+            $table->string('cliente')->nullable();
+            $table->string('cartera')->nullable();
+            $table->string('usuario')->nullable();
+            $table->string('telefono')->nullable();
+            $table->string('resultado')->nullable();
+            $table->string('tipo_gestion')->nullable();
+            $table->text('observacion')->nullable();
         });
         DB::table('tipificaciones_expertis')->insert(['tipificacion' => 'PPC', 'gestion' => 'CEF', 'peso' => 1, 'activo' => true]);
     }
