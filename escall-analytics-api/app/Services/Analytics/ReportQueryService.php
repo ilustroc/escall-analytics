@@ -128,11 +128,20 @@ final class ReportQueryService
     /** @param array<string, mixed> $filters */
     private function manualExportSource(array $filters): Builder
     {
-        return $this->gestionSource($filters)->addSelect([
+        $query = $this->gestionSource($filters)->addSelect([
             DB::raw('NULL as nombre_cliente'),
             DB::raw('NULL as cartera'),
             DB::raw('NULL as cosecha'),
         ]);
+
+        $this->applyMonthlyAssignmentRequirement(
+            $query,
+            $filters,
+            'g.fecha_gestion',
+            static fn (Builder $assignment): Builder => $assignment->whereColumn('a.documento_normalizado', 'g.dni_normalizado'),
+        );
+
+        return $query;
     }
 
     /** @param array<string, mixed> $filters */
@@ -161,6 +170,13 @@ final class ReportQueryService
 
         $query->where('l.fecha_gestion', '>=', $filters['fechaDesde'])
             ->where('l.fecha_gestion', '<', CarbonImmutable::parse((string) $filters['fechaHasta'])->addDay()->toDateString());
+
+        $this->applyMonthlyAssignmentRequirement(
+            $query,
+            $filters,
+            'l.fecha_gestion',
+            static fn (Builder $assignment): Builder => $assignment->whereColumn('a.documento_normalizado', DB::raw('TRIM(l.documento)')),
+        );
 
         return $query;
     }
@@ -213,17 +229,14 @@ final class ReportQueryService
      */
     private function enrichGestionRows(Collection $rows): Collection
     {
-        $manualRows = $rows->filter(static fn (object $row): bool => $row->medio_gestion === 'MANUAL');
-        if ($manualRows->isNotEmpty()) {
-            $this->gestiones->enrichDetails($manualRows);
-        }
+        $this->enrichRowsWithMonthlyAssignments($rows);
 
-        $discadorRows = $rows->filter(static fn (object $row): bool => $row->medio_gestion === 'DISCADOR');
-        if ($discadorRows->isNotEmpty()) {
-            $this->enrichDiscadorRows($discadorRows);
-        }
-
-        $weightKeys = $manualRows->pluck('nivel2')->unique()->values()->all();
+        $weightKeys = $rows
+            ->filter(static fn (object $row): bool => $row->medio_gestion === 'MANUAL')
+            ->pluck('nivel2')
+            ->unique()
+            ->values()
+            ->all();
         $weights = DB::table('tipificaciones_expertis')->whereIn('tipificacion', $weightKeys)->pluck('peso', 'tipificacion');
 
         return $rows->each(function (object $row) use ($weights): void {
@@ -238,7 +251,7 @@ final class ReportQueryService
     }
 
     /** @param Collection<int, object> $rows */
-    private function enrichDiscadorRows(Collection $rows): void
+    private function enrichRowsWithMonthlyAssignments(Collection $rows): void
     {
         $assignmentByPeriodAndDni = [];
 
@@ -249,7 +262,13 @@ final class ReportQueryService
             }
 
             $assignments = DB::table(config('analytics.assignment_table').' as a')
-                ->select(['a.documento_normalizado', 'a.CARTERA as cartera', 'a.cosecha'])
+                ->select([
+                    'a.documento_normalizado',
+                    'a.NombreDeudor as nombre_cliente',
+                    'a.CARTERA as cartera',
+                    'a.cosecha',
+                    'a.Canal as canal',
+                ])
                 ->where('a.FEC_PRO', $period)
                 ->whereIn('a.documento_normalizado', $dnis)
                 ->get()
@@ -266,10 +285,20 @@ final class ReportQueryService
                     ->map(static fn (mixed $value): string => trim((string) $value))
                     ->unique()
                     ->values();
+                $canales = $matches->pluck('canal')
+                    ->filter(static fn (mixed $value): bool => trim((string) $value) !== '')
+                    ->map(static fn (mixed $value): string => strtoupper(trim((string) $value)))
+                    ->unique()
+                    ->values();
 
                 $assignmentByPeriodAndDni[$period.'|'.$dni] = [
+                    'nombre_cliente' => $matches->pluck('nombre_cliente')
+                        ->filter(static fn (mixed $value): bool => trim((string) $value) !== '')
+                        ->map(static fn (mixed $value): string => trim((string) $value))
+                        ->first(),
                     'cartera' => $carteras->count() > 1 ? 'MULTICARTERA' : $carteras->first(),
                     'cosecha' => $cosechas->count() > 1 ? 'MULTICOSECHA' : $cosechas->first(),
+                    'canal_asignacion' => $canales->count() > 1 ? 'MULTICANAL' : ($canales->first() ?? 'ESCALL'),
                 ];
             }
         }
@@ -277,8 +306,33 @@ final class ReportQueryService
         $rows->each(function (object $row) use ($assignmentByPeriodAndDni): void {
             $key = CarbonImmutable::parse((string) $row->fecha_llamada)->format('Ym').'|'.$row->dni;
             $assignment = $assignmentByPeriodAndDni[$key] ?? null;
+            $row->nombre_cliente = $assignment['nombre_cliente'] ?? null;
             $row->cartera = $assignment['cartera'] ?? null;
             $row->cosecha = $assignment['cosecha'] ?? null;
+            $row->canal_asignacion = $assignment['canal_asignacion'] ?? null;
+        });
+    }
+
+    /**
+     * @param  array<string, mixed>  $filters
+     * @param  callable(Builder): Builder  $dniConstraint
+     */
+    private function applyMonthlyAssignmentRequirement(Builder $query, array $filters, string $dateColumn, callable $dniConstraint): void
+    {
+        $query->where(function (Builder $periodQuery) use ($filters, $dateColumn, $dniConstraint): void {
+            foreach ($this->monthSlices($filters) as $slice) {
+                $periodQuery->orWhere(function (Builder $sliceQuery) use ($slice, $dateColumn, $dniConstraint): void {
+                    $sliceQuery->where($dateColumn, '>=', $slice['from'])
+                        ->where($dateColumn, '<', $slice['to'])
+                        ->whereExists(function (Builder $assignment) use ($slice, $dniConstraint): void {
+                            $assignment->selectRaw('1')
+                                ->from(config('analytics.assignment_table').' as a')
+                                ->where('a.FEC_PRO', $slice['period']);
+
+                            $dniConstraint($assignment);
+                        });
+                });
+            }
         });
     }
 
@@ -307,5 +361,29 @@ final class ReportQueryService
         }
 
         return $periods;
+    }
+
+    /**
+     * @param  array<string, mixed>  $filters
+     * @return list<array{period: string, from: string, to: string}>
+     */
+    private function monthSlices(array $filters): array
+    {
+        $from = CarbonImmutable::parse((string) $filters['fechaDesde'])->startOfDay();
+        $endExclusive = CarbonImmutable::parse((string) $filters['fechaHasta'])->addDay()->startOfDay();
+        $month = $from->startOfMonth();
+        $slices = [];
+
+        while ($month < $endExclusive) {
+            $nextMonth = $month->addMonth();
+            $slices[] = [
+                'period' => $month->format('Ym'),
+                'from' => $from->greaterThan($month) ? $from->toDateString() : $month->toDateString(),
+                'to' => $endExclusive->lessThan($nextMonth) ? $endExclusive->toDateString() : $nextMonth->toDateString(),
+            ];
+            $month = $nextMonth;
+        }
+
+        return $slices;
     }
 }

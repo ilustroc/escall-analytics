@@ -72,6 +72,21 @@ final class ExpertisGestionReportTest extends TestCase
         $this->assertSame(0, $audit->metadata['gestiones']);
     }
 
+    public function test_forced_send_resends_a_report_and_records_the_override(): void
+    {
+        Mail::fake();
+
+        (new SendExpertisGestionReportJob('CORTE_20', '2026-09-23'))->handle(app(GestionCsvExportService::class), app(AnalyticsAuditService::class));
+        (new SendExpertisGestionReportJob('CORTE_20', '2026-09-23', true))->handle(app(GestionCsvExportService::class), app(AnalyticsAuditService::class));
+
+        Mail::assertSent(ExpertisGestionReportMail::class, 2);
+        $audit = AnalyticsAuditLog::query()
+            ->where('action', 'expertis_gestion_report_sent')
+            ->latest('id')
+            ->firstOrFail();
+        $this->assertSame(true, $audit->metadata['forced']);
+    }
+
     public function test_dry_run_generates_the_report_without_sending_email(): void
     {
         $this->seedGestion();
@@ -85,12 +100,15 @@ final class ExpertisGestionReportTest extends TestCase
         Storage::disk('local')->assertMissing('reports/expertis/Reporte_Gestiones_Expertis_20260901_20260923.csv');
     }
 
-    public function test_report_consolidates_manual_and_discador_without_losing_or_multiplying_calls(): void
+    public function test_report_includes_only_monthly_assigned_manual_and_discador_gestiones_without_duplicates(): void
     {
         $this->seedGestion();
+        DB::table('gestiones')->insert([
+            ['id' => 2, 'fecha_gestion' => '2026-09-24', 'dni' => '22222222', 'dni_normalizado' => '22222222', 'telefono' => '900000002', 'status' => 'NO CONTACTO', 'tipificacion' => 'NOC', 'observacion' => 'Sin asignación', 'fecha_pago' => null, 'monto_pago' => null, 'nombre' => 'Asesor Dos'],
+        ]);
         DB::table('Asignacion_Expertis_Historico')->insert([
             ['FEC_PRO' => '202609', 'Documento_RUC' => '87654321', 'documento_normalizado' => '87654321', 'NombreDeudor' => 'Asignacion Septiembre', 'CARTERA' => 'OH', 'cosecha' => 'COSECHA A', 'Canal' => 'ESCALL', 'conca' => '2-A'],
-            ['FEC_PRO' => '202609', 'Documento_RUC' => '87654321', 'documento_normalizado' => '87654321', 'NombreDeudor' => 'Asignacion Septiembre', 'CARTERA' => 'OH', 'cosecha' => 'COSECHA B', 'Canal' => 'ESCALL', 'conca' => '2-B'],
+            ['FEC_PRO' => '202609', 'Documento_RUC' => '87654321', 'documento_normalizado' => '87654321', 'NombreDeudor' => 'Asignacion Septiembre', 'CARTERA' => 'OTRA', 'cosecha' => 'COSECHA B', 'Canal' => 'OTRO CANAL', 'conca' => '2-B'],
             ['FEC_PRO' => '202608', 'Documento_RUC' => '11111111', 'documento_normalizado' => '11111111', 'NombreDeudor' => 'Asignacion Antigua', 'CARTERA' => 'ANTERIOR', 'cosecha' => 'COSECHA ANTIGUA', 'Canal' => 'ESCALL', 'conca' => '3-A'],
         ]);
         DB::table('llamadas')->insert([
@@ -111,8 +129,12 @@ final class ExpertisGestionReportTest extends TestCase
 
         $this->assertStringStartsWith("\xEF\xBB\xBF", $contents);
         $this->assertCount(19, $headers);
-        $this->assertSame(5, $report['rows']);
-        $this->assertCount(5, $records);
+        $this->assertSame([
+            'ID Gestion', 'Canal Gestion', 'Canal Asignacion', 'DNI', 'Nombre Cliente', 'Cartera', 'Asesor', 'Equipo', 'Telefono', 'Fecha Llamada',
+            'Cosecha', 'Hora', 'Nivel 1', 'Nivel 2', 'Fecha Compromiso', 'Monto', 'Observacion', 'Medio Gestion', 'Puntaje',
+        ], $headers);
+        $this->assertSame(2, $report['rows']);
+        $this->assertCount(2, $records);
         $this->assertSame('MANUAL', $records['1']['Medio Gestion']);
         $this->assertSame('Cliente Uno', $records['1']['Nombre Cliente']);
         $this->assertSame('DISCADOR', $records['10']['Medio Gestion']);
@@ -120,21 +142,45 @@ final class ExpertisGestionReportTest extends TestCase
         $this->assertSame('BUZON', $records['10']['Nivel 2']);
         $this->assertSame('17', $records['10']['Puntaje']);
         $this->assertSame('MARCADOR', $records['10']['Asesor']);
-        $this->assertSame('Cliente Discador', $records['10']['Nombre Cliente']);
-        $this->assertSame('OH', $records['10']['Cartera']);
+        $this->assertSame('Asignacion Septiembre', $records['10']['Nombre Cliente']);
+        $this->assertSame('MULTICARTERA', $records['10']['Cartera']);
         $this->assertSame('MULTICOSECHA', $records['10']['Cosecha']);
-        $this->assertSame('NO CONTACTO', $records['11']['Nivel 1']);
-        $this->assertSame('NO CONTESTA', $records['11']['Nivel 2']);
-        $this->assertSame('', $records['11']['Cosecha']);
-        $this->assertSame('', $records['11']['Cartera']);
-        $this->assertSame('15', $records['11']['Puntaje']);
-        $this->assertSame('NO CONTACTO', $records['13']['Nivel 1']);
-        $this->assertSame('ABANDONO', $records['13']['Nivel 2']);
-        $this->assertSame('16', $records['13']['Puntaje']);
-        $this->assertSame('NO CONTACTO', $records['14']['Nivel 1']);
-        $this->assertSame('FALLADO', $records['14']['Nivel 2']);
-        $this->assertSame('18', $records['14']['Puntaje']);
+        $this->assertSame('MULTICANAL', $records['10']['Canal Asignacion']);
+        $this->assertArrayNotHasKey('2', $records);
+        $this->assertArrayNotHasKey('11', $records);
+        $this->assertArrayNotHasKey('13', $records);
+        $this->assertArrayNotHasKey('14', $records);
         $this->assertArrayNotHasKey('12', $records);
+    }
+
+    public function test_report_does_not_fall_back_to_an_assignment_from_another_month(): void
+    {
+        DB::table('gestiones')->insert([
+            'fecha_gestion' => '2026-10-08',
+            'dni' => '11111111',
+            'dni_normalizado' => '11111111',
+            'telefono' => '900000111',
+            'status' => 'CONTACTO EFECTIVO',
+            'tipificacion' => 'PPC',
+            'observacion' => 'Gestión octubre',
+            'fecha_pago' => null,
+            'monto_pago' => null,
+            'nombre' => 'Asesor Octubre',
+        ]);
+        DB::table('Asignacion_Expertis_Historico')->insert([
+            'FEC_PRO' => '202609',
+            'Documento_RUC' => '11111111',
+            'documento_normalizado' => '11111111',
+            'NombreDeudor' => 'Asignación de septiembre',
+            'CARTERA' => 'ANTERIOR',
+            'cosecha' => 'COSECHA ANTERIOR',
+            'Canal' => 'ESCALL',
+            'conca' => '111-A',
+        ]);
+
+        $report = app(GestionCsvExportService::class)->createPrivateReport(CarbonImmutable::parse('2026-10-14'));
+
+        $this->assertSame(0, $report['rows']);
     }
 
     public function test_send_command_only_enqueues_the_report_job(): void
@@ -144,7 +190,28 @@ final class ExpertisGestionReportTest extends TestCase
         $this->artisan('analytics:expertis-report-email', ['--send' => true, '--cut' => 'CORTE_20', '--date' => '2026-09-23'])
             ->assertSuccessful();
 
-        Queue::assertPushed(SendExpertisGestionReportJob::class, static fn (SendExpertisGestionReportJob $job): bool => $job->cut === 'CORTE_20' && $job->reportDate === '2026-09-23' && $job->queue === 'reports');
+        Queue::assertPushed(SendExpertisGestionReportJob::class, static fn (SendExpertisGestionReportJob $job): bool => $job->cut === 'CORTE_20' && $job->reportDate === '2026-09-23' && $job->force === false && $job->queue === 'reports');
+    }
+
+    public function test_send_command_passes_force_to_the_report_job(): void
+    {
+        Queue::fake();
+
+        $this->artisan('analytics:expertis-report-email', ['--send' => true, '--force' => true, '--cut' => 'CORTE_14', '--date' => '2026-10-14'])
+            ->assertSuccessful();
+
+        Queue::assertPushed(SendExpertisGestionReportJob::class, static fn (SendExpertisGestionReportJob $job): bool => $job->cut === 'CORTE_14' && $job->reportDate === '2026-10-14' && $job->force === true && $job->queue === 'reports');
+    }
+
+    public function test_force_option_requires_an_explicit_send(): void
+    {
+        Queue::fake();
+
+        $this->artisan('analytics:expertis-report-email', ['--force' => true, '--cut' => 'CORTE_14', '--date' => '2026-10-14'])
+            ->expectsOutput('Usa --force únicamente junto con --send.')
+            ->assertFailed();
+
+        Queue::assertNothingPushed();
     }
 
     public function test_scheduler_registers_both_weekday_and_saturday_cuts(): void

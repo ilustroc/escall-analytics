@@ -9,7 +9,7 @@ use Illuminate\Console\Command;
 
 final class SendExpertisGestionReportEmail extends Command
 {
-    protected $signature = 'analytics:expertis-report-email {--dry-run : Genera el reporte sin enviar correo} {--send : Encola el envío real} {--cut=CORTE_14 : CORTE_14 o CORTE_20} {--date= : Fecha de corte YYYY-MM-DD}';
+    protected $signature = 'analytics:expertis-report-email {--dry-run : Genera el reporte sin enviar correo} {--send : Encola el envío real} {--force : Permite reenviar un corte ya enviado} {--cut=CORTE_14 : CORTE_14 o CORTE_20} {--date= : Fecha de corte YYYY-MM-DD}';
 
     protected $description = 'Genera o encola el Reporte de Gestiones Expertis';
 
@@ -28,6 +28,12 @@ final class SendExpertisGestionReportEmail extends Command
             return self::FAILURE;
         }
 
+        if ($this->option('force') && ! $this->option('send')) {
+            $this->error('Usa --force únicamente junto con --send.');
+
+            return self::FAILURE;
+        }
+
         try {
             $date = $this->option('date') === null
                 ? CarbonImmutable::now((string) config('analytics.expertis_report.timezone'))->startOfDay()
@@ -39,7 +45,7 @@ final class SendExpertisGestionReportEmail extends Command
         }
 
         if ($this->option('send')) {
-            SendExpertisGestionReportJob::dispatch($cut, $date->toDateString());
+            SendExpertisGestionReportJob::dispatch($cut, $date->toDateString(), (bool) $this->option('force'));
             $this->info("Reporte {$cut} encolado para {$date->toDateString()}.");
 
             return self::SUCCESS;

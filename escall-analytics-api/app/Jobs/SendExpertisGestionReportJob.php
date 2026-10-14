@@ -20,7 +20,7 @@ final class SendExpertisGestionReportJob implements ShouldQueue
 
     public int $tries = 3;
 
-    public function __construct(public readonly string $cut, public readonly string $reportDate)
+    public function __construct(public readonly string $cut, public readonly string $reportDate, public readonly bool $force = false)
     {
         $this->onQueue('reports');
     }
@@ -33,7 +33,7 @@ final class SendExpertisGestionReportJob implements ShouldQueue
 
     public function handle(GestionCsvExportService $csv, AnalyticsAuditService $audit): void
     {
-        if ($audit->wasExpertisReportSent($this->reportDate, $this->cut)) {
+        if (! $this->force && $audit->wasExpertisReportSent($this->reportDate, $this->cut)) {
             return;
         }
 
@@ -55,6 +55,7 @@ final class SendExpertisGestionReportJob implements ShouldQueue
                 'archivo' => $report['filename'],
                 'to' => $to,
                 'cc' => $cc,
+                ...($this->force ? ['forced' => true] : []),
             ]);
         } catch (Throwable $exception) {
             $audit->logSystem('expertis_gestion_report_failed', [
