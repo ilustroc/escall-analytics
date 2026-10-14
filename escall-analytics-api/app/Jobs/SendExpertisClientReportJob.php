@@ -34,12 +34,13 @@ final class SendExpertisClientReportJob implements ShouldQueue
     {
         if (! $this->force && $audit->wasExpertisClientReportSent($this->reportDate)) {
             return;
-        } $report = $xlsx->createPrivateReport(CarbonImmutable::parse($this->reportDate, (string) config('analytics.expertis_report.timezone')));
-        $to = config('analytics.expertis_report.to', []);
-        $cc = config('analytics.expertis_report.cc', []);
+        }
+
+        $report = $xlsx->createPrivateReport(CarbonImmutable::parse($this->reportDate, (string) config('analytics.expertis_report.timezone')));
+        $recipients = config('analytics.expertis_report.cc', []);
         try {
-            Mail::to($to)->cc($cc)->send(new ExpertisClientReportMail($report['subject'], $report['periodLabel'], $report['path'], $report['filename']));
-            $audit->logSystem('expertis_client_report_sent', ['reportDate' => $this->reportDate, 'rows' => $report['rows'], 'range' => $report['range'], 'archivo' => $report['filename'], 'to' => $to, 'cc' => $cc, ...($this->force ? ['forced' => true] : [])]);
+            Mail::to($recipients)->send(new ExpertisClientReportMail($report['subject'], $report['periodLabel'], $report['path'], $report['filename']));
+            $audit->logSystem('expertis_client_report_sent', ['reportDate' => $this->reportDate, 'rows' => $report['rows'], 'range' => $report['range'], 'archivo' => $report['filename'], 'to' => $recipients, 'cc' => [], ...($this->force ? ['forced' => true] : [])]);
         } catch (Throwable $exception) {
             $audit->logSystem('expertis_client_report_failed', ['reportDate' => $this->reportDate, 'error' => 'No se pudo enviar el reporte de cartera Expertis.']);
             throw $exception;
