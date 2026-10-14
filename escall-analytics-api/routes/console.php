@@ -21,3 +21,9 @@ Schedule::command('analytics:expertis-report-email --send --cut=CORTE_20')
     ->timezone((string) config('analytics.expertis_report.timezone'))
     ->withoutOverlapping(180)
     ->name('expertis-gestion-report-corte-20');
+
+Schedule::command('analytics:expertis-client-report-email --send')
+    ->dailyAt('07:00')
+    ->timezone((string) config('analytics.expertis_report.timezone'))
+    ->withoutOverlapping(180)
+    ->name('expertis-client-report-0700');

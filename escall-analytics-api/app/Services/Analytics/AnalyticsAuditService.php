@@ -52,4 +52,12 @@ final class AnalyticsAuditService
             ->whereJsonContains('metadata->cut', $cut)
             ->exists();
     }
+
+    public function wasExpertisClientReportSent(string $date): bool
+    {
+        return AnalyticsAuditLog::query()
+            ->where('action', 'expertis_client_report_sent')
+            ->whereJsonContains('metadata->reportDate', $date)
+            ->exists();
+    }
 }
